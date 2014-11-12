@@ -101,26 +101,25 @@ int main(int argc, char* argv[]) {
   // generate lead-in code (allocates the array)
   fprintf(out, ".globl _main\n");
   fprintf(out, "_main:\n");
-  fprintf(out, "  push %%ebp\n");
-  fprintf(out, "  mov %%esp, %%ebp\n");
-  fprintf(out, "  push %%esi\n");
-  fprintf(out, "  pushl $%d\n", mem_size);
+  fprintf(out, "  push %%rbp\n");
+  fprintf(out, "  mov %%rsp, %%rbp\n");
+  fprintf(out, "  mov $%d, %%rdi\n", mem_size);
   fprintf(out, "  call _malloc\n");
-  fprintf(out, "  addl $4, %%esp\n");
-  fprintf(out, "  movl %%eax, %%edx\n");
-  fprintf(out, "  leal %d(%%eax), %%ecx\n", (mem_size - 1));
+  fprintf(out, "  mov %%rax, %%r14\n");
+  fprintf(out, "  mov %%r14, %%r12\n");
+  fprintf(out, "  lea %d(%%r14), %%r13\n", (mem_size - 1));
 
   // zero the memory block
   fprintf(out, "0:\n");
-  fprintf(out, "  movb $0, (%%edx)\n");
-  fprintf(out, "  incl %%edx\n");
-  fprintf(out, "  cmpl %%ecx, %%edx\n");
+  fprintf(out, "  movb $0, (%%r12)\n");
+  fprintf(out, "  inc %%r12\n");
+  fprintf(out, "  cmp %%r13, %%r12\n");
   fprintf(out, "  jle 0b\n");
-  fprintf(out, "  movl %%eax, %%edx\n");
+  fprintf(out, "  mov %%r14, %%r12\n");
 
-  // eax = beginning of mem block
-  // ecx = last byte in mem block
-  // edx = current ptr
+  // r12 = current ptr
+  // r13 = end ptr
+  // r14 = begin ptr
 
   // generate assembly
   char prev = 1;
@@ -138,57 +137,57 @@ int main(int argc, char* argv[]) {
     switch (prev) {
       case '+':
         if (numPrev == 1)
-          fprintf(out, "  incb (%%edx)\n");
+          fprintf(out, "  incb (%%r12)\n");
         else
-          fprintf(out, "  addb $%d, (%%edx)\n", numPrev);
+          fprintf(out, "  addb $%d, (%%r12)\n", numPrev);
         break;
       case '-':
         if (numPrev == 1)
-          fprintf(out, "  decb (%%edx)\n");
+          fprintf(out, "  decb (%%r12)\n");
         else
-          fprintf(out, "  subb $%d, (%%edx)\n", numPrev);
+          fprintf(out, "  subb $%d, (%%r12)\n", numPrev);
         break;
       case '>':
         if (numPrev == 1) {
           if (optimize < 2) {
-            fprintf(out, "  cmpl %%ecx, %%edx\n");
+            fprintf(out, "  cmp %%r13, %%r12\n");
             fprintf(out, "  jge 1f\n");
           }
-          fprintf(out, "  incl %%edx\n");
+          fprintf(out, "  inc %%r12\n");
         } else {
           if (optimize < 2) {
-            fprintf(out, "  movl %%edx, %%esi\n");
-            fprintf(out, "  addl $%d, %%esi\n", numPrev);
-            fprintf(out, "  cmpl %%ecx, %%esi\n");
+            fprintf(out, "  mov %%r12, %%rax\n");
+            fprintf(out, "  add $%d, %%rax\n", numPrev);
+            fprintf(out, "  cmp %%r13, %%rax\n");
             fprintf(out, "  jge 0f\n");
-            fprintf(out, "  movl %%esi, %%edx\n");
+            fprintf(out, "  mov %%rax, %%r12\n");
             fprintf(out, "  jmp 1f\n");
             fprintf(out, "0:\n");
-            fprintf(out, "  movl %%ecx, %%edx\n");
+            fprintf(out, "  mov %%r13, %%r12\n");
           } else
-            fprintf(out, "  addl $%d, %%edx\n", numPrev);
+            fprintf(out, "  add $%d, %%r12\n", numPrev);
         }
         fprintf(out, "1:\n");
         break;
       case '<':
         if (numPrev == 1) {
           if (optimize < 2) {
-            fprintf(out, "  cmpl %%eax, %%edx\n");
+            fprintf(out, "  cmp %%r14, %%r12\n");
             fprintf(out, "  jle 1f\n");
           }
-          fprintf(out, "  decl %%edx\n");
+          fprintf(out, "  dec %%r12\n");
         } else {
           if (optimize < 2) {
-            fprintf(out, "  movl %%edx, %%esi\n");
-            fprintf(out, "  subl $%d, %%esi\n", numPrev);
-            fprintf(out, "  cmpl %%eax, %%esi\n");
+            fprintf(out, "  mov %%r12, %%rax\n");
+            fprintf(out, "  sub $%d, %%rax\n", numPrev);
+            fprintf(out, "  cmp %%r14, %%rax\n");
             fprintf(out, "  jle 0f\n");
-            fprintf(out, "  movl %%esi, %%edx\n");
+            fprintf(out, "  mov %%rax, %%r12\n");
             fprintf(out, "  jmp 1f\n");
             fprintf(out, "0:\n");
-            fprintf(out, "  movl %%eax, %%edx\n");
+            fprintf(out, "  mov %%r14, %%r12\n");
           } else
-            fprintf(out, "  subl $%d, %%edx\n", numPrev);
+            fprintf(out, "  sub $%d, %%r12\n", numPrev);
         }
         fprintf(out, "1:\n");
         break;
@@ -201,7 +200,7 @@ int main(int argc, char* argv[]) {
           jump_ids[num_jump_ids] = latest_jump_id++;
           num_jump_ids++;
 
-          fprintf(out, "  cmpb $0, (%%edx)\n");
+          fprintf(out, "  cmpb $0, (%%r12)\n");
           fprintf(out, "  je jump_%d_end\n", jump_ids[num_jump_ids - 1]);
           fprintf(out, "jump_%d_begin:\n", jump_ids[num_jump_ids - 1]);
         }
@@ -212,45 +211,23 @@ int main(int argc, char* argv[]) {
             fprintf(stderr, "error: unbalanced loop braces\n");
             return (-1);
           }
-          fprintf(out, "  cmpb $0, (%%edx)\n");
+          fprintf(out, "  cmpb $0, (%%r12)\n");
           fprintf(out, "  jne jump_%d_begin\n", jump_ids[num_jump_ids - 1]);
           fprintf(out, "jump_%d_end:\n", jump_ids[num_jump_ids - 1]);
           num_jump_ids--;
         }
         break;
       case '.':
-        fprintf(out, "  subl $4, %%esp\n");
-        fprintf(out, "  pushl %%eax\n");
-        fprintf(out, "  pushl %%ecx\n");
-        fprintf(out, "  pushl %%edx\n");
         for (; numPrev > 0; numPrev--) {
-          fprintf(out, "  movzbl (%%edx), %%eax\n");
-          fprintf(out, "  pushl %%eax\n");
+          fprintf(out, "  movzbq (%%r12), %%rdi\n");
           fprintf(out, "  call _putchar\n");
-          fprintf(out, "  addl $4, %%esp\n");
-          if (numPrev > 1) {
-            fprintf(out, "  movl (%%esp), %%edx\n");
-          }
         }
-        fprintf(out, "  popl %%edx\n");
-        fprintf(out, "  popl %%ecx\n");
-        fprintf(out, "  popl %%eax\n");
-        fprintf(out, "  addl $4, %%esp\n");
         break;
       case ',':
-        fprintf(out, "  subl $8, %%esp\n");
-        fprintf(out, "  pushl %%eax\n");
-        fprintf(out, "  pushl %%ecx\n");
-        fprintf(out, "  pushl %%edx\n");
         for (; numPrev > 0; numPrev--) {
           fprintf(out, "  call _getchar\n");
-          fprintf(out, "  movl (%%esp), %%edx\n");
-          fprintf(out, "  movb %%al, (%%edx)\n");
+          fprintf(out, "  movb %%al, (%%r12)\n");
         }
-        fprintf(out, "  popl %%edx\n");
-        fprintf(out, "  popl %%ecx\n");
-        fprintf(out, "  popl %%eax\n");
-        fprintf(out, "  addl $8, %%esp\n");
         break;
     }
     prev = srcval;
@@ -258,11 +235,9 @@ int main(int argc, char* argv[]) {
   }
 
   // generate lead-out code (frees the array)
-  fprintf(out, "  pushl %%eax\n");
+  fprintf(out, "  mov %%r14, %%rdi\n");
   fprintf(out, "  call _free\n");
-  fprintf(out, "  addl $4, %%esp\n");
-  fprintf(out, "  pop %%esi\n");
-  fprintf(out, "  pop %%ebp\n");
+  fprintf(out, "  pop %%rbp\n");
   fprintf(out, "  ret\n");
 
   fclose(out);
@@ -271,7 +246,7 @@ int main(int argc, char* argv[]) {
   if (!skip_assembly) {
     // compile that sucker
     char* command;
-    asprintf(&command, "gcc -o %s -m32 -x assembler-with-cpp %s", output_filename, temp_filename);
+    asprintf(&command, "gcc -o %s -m64 -x assembler-with-cpp %s", output_filename, temp_filename);
     if (system(command)) {
       fprintf(stderr, "opc: failed to assemble program; command: %s\n", command);
       retcode = 3;
