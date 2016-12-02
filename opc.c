@@ -1,20 +1,16 @@
-// build this file with:
-// gcc -Wall opc.c -o opc
-// then build BF programs with:
-// ./opc $INPUT_BF_FILE [$OUTPUT_EXECUTABLE]
-
 #include <stdlib.h>
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
 
+
 int is_bf_command(int cmd) {
   return (cmd == '+') || (cmd == '-') || (cmd == '<') || (cmd == '>') ||
          (cmd == '[') || (cmd == ']') || (cmd == ',') || (cmd == '.');
 }
 
-// builds a Brainfuck program (outputs assembly code)
+
 int main(int argc, char* argv[]) {
 
   int optimize = 1;
@@ -28,66 +24,70 @@ int main(int argc, char* argv[]) {
   const char* temp_filename = NULL;
   for (x = 1; x < argc; x++) {
     if (argv[x][0] == '-' && argv[x][1]) {
-      if (argv[x][1] == 'm')
+      if (argv[x][1] == 'm') {
         mem_size = atoi(&argv[x][2]);
-      else if (argv[x][1] == 'O')
+      } else if (argv[x][1] == 'O') {
         optimize = atoi(&argv[x][2]);
-      else if (argv[x][1] == 's')
+      } else if (argv[x][1] == 's') {
         skip_assembly = 1;
-      else {
-        fprintf(stderr, "opc: unknown command-line option: %s\n", argv[x]);
+      } else {
+        fprintf(stderr, "unknown command-line option: %s\n", argv[x]);
         num_bad_options++;
       }
     } else {
       if (input_filename) {
         if (output_filename) {
-          fprintf(stderr, "opc: too many filenames\n");
+          fprintf(stderr, "too many filenames\n");
           num_bad_options++;
-        } else
+        } else {
           output_filename = argv[x];
-      } else
+        }
+      } else {
         input_filename = argv[x];
+      }
     }
   }
 
   if (!input_filename) {
-    fprintf(stderr, "opc: no input file\n");
+    fprintf(stderr, "no input file\n");
     num_bad_options++;
   }
 
   if (num_bad_options) {
-    fprintf(stderr, "opc: usage: %s [-mX] [-xN] [-s] input_file [output_file]\n", argv[0]);
-    fprintf(stderr, "opc:   -mX sets memory size for program (default 1M)\n");
-    fprintf(stderr, "opc:   -O sets optimization level (0-2) (default 1)\n");
-    fprintf(stderr, "opc:   -s skips assembly step (output will be x86 assembly code)\n");
+    fprintf(stderr, "usage: %s [-mX] [-ON] [-s] input_file [-o output_file]\n", argv[0]);
+    fprintf(stderr, "  -mX sets memory size for program (default 1M)\n");
+    fprintf(stderr, "  -O sets optimization level (0-2) (default 1)\n");
+    fprintf(stderr, "  -s skips assembly step (output will be amd64 assembly code)\n");
+    fprintf(stderr, "  if no output filename is given, the code is interpreted instead\n");
     return 1;
   }
 
   FILE *source, *out;
-  if (!strcmp(input_filename, "-"))
+  if (!strcmp(input_filename, "-")) {
     source = stdin;
-  else {
+  } else {
     source = fopen(input_filename, "rt");
     if (!source) {
-      printf("opc: failed to open \"%s\" for reading (%d)\n", input_filename, errno);
+      printf("failed to open \"%s\" for reading (%d)\n", input_filename, errno);
       return 2;
     }
   }
 
-  if (!output_filename)
+  if (!output_filename) {
     output_filename = "a.out";
+  }
 
   if (!skip_assembly) {
     temp_filename = tmpnam(NULL);
     out = fopen(temp_filename, "wt");
     if (!out) {
-      printf("opc: failed to open \"%s\" for writing (%d)\n", temp_filename, errno);
+      printf("failed to open \"%s\" for writing (%d)\n", temp_filename, errno);
       return 2;
     }
   } else {
     out = fopen(output_filename, "wt");
     if (!out) {
-      printf("opc: failed to open \"%s\" for writing (%d)\n", output_filename, errno);
+      printf("failed to open \"%s\" for writing (%d)\n", output_filename, errno);
       return 2;
     }
   }
@@ -126,8 +126,9 @@ int main(int argc, char* argv[]) {
   int numPrev = 1;
   while (prev != EOF) {
     int srcval = fgetc(source);
-    if (srcval != EOF && !is_bf_command(srcval))
+    if (srcval != EOF && !is_bf_command(srcval)) {
       continue;
+    }
     if (optimize) {
       if (srcval == prev) {
         numPrev++;
@@ -136,16 +137,18 @@ int main(int argc, char* argv[]) {
     }
     switch (prev) {
       case '+':
-        if (numPrev == 1)
+        if (numPrev == 1) {
           fprintf(out, "  incb (%%r12)\n");
-        else
+        } else {
           fprintf(out, "  addb $%d, (%%r12)\n", numPrev);
+        }
         break;
       case '-':
-        if (numPrev == 1)
+        if (numPrev == 1) {
           fprintf(out, "  decb (%%r12)\n");
-        else
+        } else {
           fprintf(out, "  subb $%d, (%%r12)\n", numPrev);
+        }
         break;
       case '>':
         if (numPrev == 1) {
@@ -164,8 +167,9 @@ int main(int argc, char* argv[]) {
             fprintf(out, "  jmp 1f\n");
             fprintf(out, "0:\n");
             fprintf(out, "  mov %%r13, %%r12\n");
-          } else
+          } else {
             fprintf(out, "  add $%d, %%r12\n", numPrev);
+          }
         }
         fprintf(out, "1:\n");
         break;
@@ -186,8 +190,9 @@ int main(int argc, char* argv[]) {
             fprintf(out, "  jmp 1f\n");
             fprintf(out, "0:\n");
             fprintf(out, "  mov %%r14, %%r12\n");
-          } else
+          } else {
             fprintf(out, "  sub $%d, %%r12\n", numPrev);
+          }
         }
         fprintf(out, "1:\n");
         break;

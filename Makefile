@@ -1,6 +1,6 @@
 CC=gcc
 OBJECTS=opc.o
-CFLAGS=-O3 -s -Wall -Wno-deprecated-declarations
+CFLAGS=-O3 -Wall -Werror -Wno-deprecated-declarations
 EXECUTABLES=opc
 
 all: opc
