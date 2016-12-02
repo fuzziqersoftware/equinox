@@ -1,17 +1,14 @@
-CC=gcc
+CXX=g++
 OBJECTS=opc.o
-CFLAGS=-O3 -Wall -Werror -Wno-deprecated-declarations
-EXECUTABLES=opc
+CXXFLAGS=-I/usr/local/include -std=c++14 -O3 -Wall -Werror -Wno-deprecated-declarations
+LDFLAGS=-L/usr/local/lib -lphosg
 
 all: opc
 
 opc: $(OBJECTS)
 	g++ $(LDFLAGS) -o opc $^
 
-install: opc
-	cp opc /usr/bin/opc
-
 clean:
-	-rm -f *.o $(EXECUTABLES)
+	-rm -f *.o opc
 
 .PHONY: clean
