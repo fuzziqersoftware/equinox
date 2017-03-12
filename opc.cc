@@ -337,7 +337,7 @@ int main(int argc, char* argv[]) {
   }
 
   if (num_bad_options) {
-    fprintf(stderr, "usage: %s [-mX] [-ON] [-s] input_file [-o output_file]\n", argv[0]);
+    fprintf(stderr, "usage: %s [-mX] [-ON] [-s] input_file [output_file]\n", argv[0]);
     fprintf(stderr, "  -mX sets memory size for program (default 1M)\n");
     fprintf(stderr, "  -O sets optimization level (0-2) (default 1)\n");
     fprintf(stderr, "  -s skips assembly step (output will be amd64 assembly code)\n");
