@@ -1,2 +1,4 @@
 *.o
 opc
+.DS_Store
+*.dSYM
