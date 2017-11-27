@@ -1,5 +1,5 @@
 CXX=g++
-OBJECTS=opc.o
+OBJECTS=opc.o AMD64Assembler.o CodeBuffer.o
 CXXFLAGS=-I/usr/local/include -std=c++14 -O3 -Wall -Werror -Wno-deprecated-declarations
 LDFLAGS=-L/usr/local/lib -lphosg
 
