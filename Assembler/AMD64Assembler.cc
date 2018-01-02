@@ -1562,10 +1562,12 @@ void AMD64Assembler::write_test(const MemoryReference& a,
   if (a.field_size && b.field_size) {
     throw invalid_argument("test opcode can have at most one memory reference");
   }
+
+  Operation op = (size == OperandSize::Byte) ? Operation::TEST8 : Operation::TEST;
   if (a.field_size) {
-    this->write_rm(Operation::TEST, a, b.base_register, size);
+    this->write_rm(op, a, b.base_register, size);
   } else {
-    this->write_rm(Operation::TEST, b, a.base_register, size);
+    this->write_rm(op, b, a.base_register, size);
   }
 }
 

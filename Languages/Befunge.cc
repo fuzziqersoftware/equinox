@@ -12,7 +12,7 @@ using namespace std;
 
 
 const vector<Direction> all_directions({
-    Direction::Right, Direction::Left, Direction::Down, Direction::Up});
+    Direction::Left, Direction::Up, Direction::Right, Direction::Down});
 
 const char* name_for_direction(Direction d) {
   switch (d) {
@@ -72,10 +72,16 @@ size_t Field::height() const {
 }
 
 ssize_t Field::wrap_x(ssize_t x) const {
+  while (x < 0) {
+    x += this->w;
+  }
   return x % this->w;
 }
 
 ssize_t Field::wrap_y(ssize_t y) const {
+  while (y < 0) {
+    y += this->lines.size();
+  }
   return y % static_cast<ssize_t>(this->lines.size());
 }
 
@@ -88,19 +94,19 @@ Field Field::load(const string& filename) {
   while (newline_offset != string::npos) {
     size_t line_length = newline_offset - line_start_offset;
     f.lines.emplace_back(code.substr(line_start_offset, line_length));
-
-    if (f.w < line_length) {
-      f.w = line_length;
-    }
-
     line_start_offset = newline_offset + 1;
     newline_offset = code.find('\n', line_start_offset);
   }
 
-  size_t last_line_length = code.size() - line_start_offset;
   f.lines.emplace_back(code.substr(line_start_offset));
-  if (f.w < last_line_length) {
-    f.w = last_line_length;
+
+  for (string& line : f.lines) {
+    if (!line.empty() && (line[line.size() - 1] == '\r')) {
+      line.pop_back();
+    }
+    if (line.size() > f.w) {
+      f.w = line.size();
+    }
   }
 
   return f;
@@ -120,6 +126,42 @@ Position Position::copy() const {
 
 Position& Position::face(Direction dir) {
   this->dir = dir;
+  return *this;
+}
+
+Position& Position::turn_left() {
+  switch (this->dir) {
+    case Direction::Left:
+      this->dir = Direction::Down;
+      break;
+    case Direction::Right:
+      this->dir = Direction::Up;
+      break;
+    case Direction::Up:
+      this->dir = Direction::Left;
+      break;
+    case Direction::Down:
+      this->dir = Direction::Right;
+      break;
+  }
+  return *this;
+}
+
+Position& Position::turn_right() {
+  switch (this->dir) {
+    case Direction::Left:
+      this->dir = Direction::Up;
+      break;
+    case Direction::Right:
+      this->dir = Direction::Down;
+      break;
+    case Direction::Up:
+      this->dir = Direction::Right;
+      break;
+    case Direction::Down:
+      this->dir = Direction::Left;
+      break;
+  }
   return *this;
 }
 
@@ -160,8 +202,8 @@ string Position::label() const {
   if (this->special_cell_id) {
     return string_printf("Special_%zu", this->special_cell_id);
   }
-  return string_printf("%zd_%zd_%s", this->x, this->y,
-      name_for_direction(this->dir));
+  return string_printf("%zd_%zd_%s_%s", this->x, this->y,
+      name_for_direction(this->dir), this->stack_aligned ? "aligned" : "misaligned");
 }
 
 bool Position::operator<(const Position& other) const {

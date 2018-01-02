@@ -16,6 +16,7 @@
 #include "Languages/BefungeInterpreter.hh"
 #include "Languages/BefungeJITCompiler.hh"
 #include "Languages/Brainfuck.hh"
+#include "Languages/MalbolgeInterpreter.hh"
 
 using namespace std;
 
@@ -30,6 +31,7 @@ enum Behavior {
 enum Language {
   Brainfuck = 0,
   Befunge,
+  Malbolge,
 };
 
 
@@ -69,6 +71,8 @@ int main(int argc, char* argv[]) {
       language = Language::Brainfuck;
     } else if (!strcmp(argv[x], "--befunge")) {
       language = Language::Befunge;
+    } else if (!strcmp(argv[x], "--malbolge")) {
+      language = Language::Malbolge;
 
     // brainfuck options
     } else if (!strncmp(argv[x], "--memory-size=", 14)) {
@@ -121,11 +125,11 @@ Brainfuck can run in all modes. Options:\n\
       Level 1: Collapse repeated opcodes into more efficient instructions.\n\
       Level 2: Eliminate memory boundary checks.\n\
 \n\
-Befunge runs only in execute mode. Options:\n\
+Befunge runs only in execute or interpret mode. Options:\n\
   --enable-debug-opcode\n\
       Enable the stack debug opcode. With this flag, the opcode Y causes the\n\
       compiler to print the contents of the stack to stderr. Without this flag,\n\
-      the opcode Y causes a compile error.\n\
+      the opcode Y causes an error.\n\
 ", argv[0], argv[0], argv[0]);
     return 1;
   }
@@ -149,6 +153,14 @@ Befunge runs only in execute mode. Options:\n\
       } else if (behavior == Behavior::Execute) {
         uint64_t debug_flags = (assembly ? 2 : 0) | (enable_debug_opcode ? 1 : 0);
         BefungeJITCompiler(input_filename, debug_flags).execute();
+      }
+    } else if (language == Language::Malbolge) {
+      if (behavior == Behavior::Interpret) {
+        malbolge_interpret(input_filename);
+      } else if (behavior == Behavior::Compile) {
+        throw logic_error("malbolge compiler not implemented");
+      } else if (behavior == Behavior::Execute) {
+        throw logic_error("malbolge executor not implemented");
       }
     }
   } catch (const exception& e) {

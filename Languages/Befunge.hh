@@ -8,10 +8,10 @@
 
 
 enum Direction {
-  Right = 0,
-  Left = 1,
-  Down = 2,
-  Up = 3,
+  Left = 0,
+  Up = 1,
+  Right = 2,
+  Down = 3,
 };
 
 extern const std::vector<Direction> all_directions;
@@ -20,7 +20,7 @@ const char* name_for_direction(Direction d);
 
 struct Field {
   std::vector<std::string> lines;
-  size_t w;
+  ssize_t w;
 
   Field();
 
@@ -48,6 +48,8 @@ struct Position {
 
   Position copy() const;
   Position& face(Direction dir);
+  Position& turn_left();
+  Position& turn_right();
   Position& move_forward();
   Position& face_and_move(Direction dir);
   Position& change_alignment();

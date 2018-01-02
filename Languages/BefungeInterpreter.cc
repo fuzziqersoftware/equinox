@@ -73,6 +73,15 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
           stack.push(opcode - '0');
           break;
 
+        case 'a':
+        case 'b':
+        case 'c':
+        case 'd':
+        case 'e':
+        case 'f':
+          stack.push(opcode - 'a' + 10);
+          break;
+
         case '+':
           stack.push(stack.pop() + stack.pop());
           break;
@@ -121,6 +130,12 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
         case 'v': // move down
           pos.face(Direction::Down);
           break;
+        case '[': // turn left
+          pos.turn_left();
+          break;
+        case ']': // turn right
+          pos.turn_right();
+          break;
 
         case '?': // move randomly
           pos.face(static_cast<Direction>(rand() & 3));
@@ -147,6 +162,21 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
           }
 
           // pos now points to the terminal quote; we'll automatically move
+          // forward after this loop
+          break;
+        }
+
+        case ';': { // skip over a segment
+          pos.move_forward();
+          for (;;) {
+            int16_t value = field.get(pos.x, pos.y);
+            if (value == ';') {
+              break;
+            }
+            pos.move_forward();
+          }
+
+          // pos now points to the terminal semicolon; we'll automatically move
           // forward after this loop
           break;
         }
@@ -234,7 +264,8 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
 
         default:
           throw invalid_argument(string_printf(
-              "can\'t compile character %c at (%zd, %zd)", opcode, pos.x, pos.y));
+              "can\'t interpret character %02hX '%c' at (%zd, %zd)", opcode,
+              opcode, pos.x, pos.y));
     }
     pos.move_forward();
   }
