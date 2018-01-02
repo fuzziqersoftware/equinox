@@ -192,6 +192,11 @@ Position& Position::change_alignment() {
   return *this;
 }
 
+Position& Position::set_aligned(bool aligned) {
+  this->stack_aligned = aligned;
+  return *this;
+}
+
 Position& Position::wrap_to_field(const Field& f) {
   this->x = f.wrap_x(this->x);
   this->y = f.wrap_y(this->y);

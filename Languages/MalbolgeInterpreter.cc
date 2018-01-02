@@ -48,9 +48,6 @@ void malbolge_interpret(const string& filename) {
     uint16_t opcode = memory[c];
     uint8_t normalized_opcode = (opcode + c) % 94;
 
-    fprintf(stderr, "[A=%zX,C=%zX,D=%zX] opcode=%04hX normalized=%02hhX\n",
-        a, c, d, opcode, normalized_opcode);
-
     switch (normalized_opcode) {
       case 4:
         c = program[d];

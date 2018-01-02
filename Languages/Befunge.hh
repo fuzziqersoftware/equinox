@@ -53,6 +53,7 @@ struct Position {
   Position& move_forward();
   Position& face_and_move(Direction dir);
   Position& change_alignment();
+  Position& set_aligned(bool aligned);
   Position& wrap_to_field(const Field& f);
 
   std::string label() const;

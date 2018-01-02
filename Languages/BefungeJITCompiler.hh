@@ -8,6 +8,8 @@
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../Assembler/AMD64Assembler.hh"
@@ -40,7 +42,7 @@ private:
     size_t code_size;
     size_t buffer_capacity;
 
-    int64_t next_position_token;
+    std::unordered_set<int64_t> next_position_tokens;
     std::set<Position> address_dependencies;
 
     CompiledCell();

@@ -92,12 +92,11 @@ void BefungeJITCompiler::execute() {
 }
 
 BefungeJITCompiler::CompiledCell::CompiledCell() : code(NULL), code_size(0),
-    buffer_capacity(0), next_position_token(0) { }
+    buffer_capacity(0) { }
 BefungeJITCompiler::CompiledCell::CompiledCell(void* code, size_t code_size) :
-    code(code), code_size(code_size), buffer_capacity(code_size),
-    next_position_token(0) { }
+    code(code), code_size(code_size), buffer_capacity(code_size) { }
 BefungeJITCompiler::CompiledCell::CompiledCell(const Position& dependency) :
-    code(NULL), code_size(0), buffer_capacity(0), next_position_token(0),
+    code(NULL), code_size(0), buffer_capacity(0),
     address_dependencies({dependency}) { }
 
 void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
@@ -145,7 +144,6 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_je("stack_one_item");
 
       // if the stack is empty, leave it alone (the result is 0)
-      // TODO: technically this is wrong for 0 / 0 and 0 % 0
       this->write_jump_to_cell(pos, as, pos.copy().move_forward());
 
       // if there's one item on the stack:
@@ -393,13 +391,6 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         char_pos.move_forward();
       }
 
-      {
-        string where = pos.label();
-        string target = char_pos.label();
-        fprintf(stderr, "[compile_cell:k] where=%s, target=%s\n", where.c_str(), target.c_str());
-      }
-
-      as.write_label(string_printf("iterated_subopcode_%c", value));
       this->compile_opcode_iterated(as, pos, char_pos, value);
       break;
     }
@@ -407,7 +398,6 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
     case 'p': // write program space
       // all cases end up calling a function with these first 2 args
       as.write_mov(rdi, this->common_object_reference("this"));
-      as.write_mov(rsi, this->next_token);
 
       // since we need 3 values from the stack, there are 4 cases here
       as.write_cmp(rsp, r13);
@@ -445,9 +435,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_label("call_other_alignment");
       {
         Position next_pos = pos.copy().move_forward().change_alignment();
-        cell.next_position_token = this->next_token++;
-        this->token_to_position.emplace(cell.next_position_token, next_pos);
+        int64_t token = this->next_token++;
+        cell.next_position_tokens.emplace(token);
+        this->token_to_position.emplace(token, next_pos);
 
+        as.write_mov(rsi, token);
         if (!pos.stack_aligned) {
           as.write_push(this->common_object_reference("dispatch_compile_cell_ret_aligned"));
         } else {
@@ -460,9 +452,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_label("call_same_alignment");
       {
         Position next_pos = pos.copy().move_forward();
-        cell.next_position_token = this->next_token++;
-        this->token_to_position.emplace(cell.next_position_token, next_pos);
+        int64_t token = this->next_token++;
+        cell.next_position_tokens.emplace(token);
+        this->token_to_position.emplace(token, next_pos);
 
+        as.write_mov(rsi, token);
         if (pos.stack_aligned) {
           as.write_push(this->common_object_reference("dispatch_compile_cell_ret_aligned"));
         } else {
@@ -555,18 +549,17 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
   // iterator_pos and target_pos refer to the position before the count is
   // popped (immediately below)
 
+  as.write_label(string_printf("iterated_subopcode_%c", opcode));
+
   // get the iteration count
   as.write_cmp(rsp, r13);
-  as.write_jg("skip_pop_count");
+  as.write_jg("opcode_end_zero_count_alignment_same");
 
   as.write_pop(r11);
-  as.write_mov(r10, 1);
-  as.write_jmp("count_ready");
+  as.write_test(r11, r11);
+  as.write_jz("opcode_end_zero_count_alignment_changed");
 
-  as.write_label("skip_pop_count");
-  as.write_xor(r11, r11);
-  as.write_xor(r10, r10);
-  as.write_label("count_ready");
+  as.write_mov(r10, 1);
 
   // if the iteration count is odd, then the resulting jmp afterward may need to
   // change stack alignments, so keep track of that here
@@ -609,6 +602,27 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
       as.write_label("iterate_done");
       break;
 
+    case '$': // discard n stack items
+      as.write_lea(rdx, MemoryReference(rsp, 0, r11, 8));
+      as.write_cmp(rdx, r13);
+      as.write_jle("stack_sufficient");
+
+      // there aren't enough items on the stack to pop them all - just clear the
+      // entire stack
+      {
+        as.write_lea(rsp, MemoryReference(r13, 8));
+        this->write_jump_to_cell(iterator_pos, as,
+            iterator_pos.copy().move_forward().set_aligned(false));
+      }
+
+      // there are enough items on the stack to pop them all. if we pop an odd
+      // number of stack items, track the alignment change
+      as.write_label("stack_sufficient");
+      as.write_xor(r10b, r11b, OperandSize::Byte);
+      as.write_and(r10b, 1, OperandSize::Byte);
+      as.write_mov(rsp, rdx);
+      break;
+
     case '`':
     case '+':
     case '-':
@@ -619,7 +633,6 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
       as.write_jz("opcode_end");
 
       // if the stack is empty, leave it alone (the result is 0)
-      // TODO: technically this is wrong for 0 / 0 and 0 % 0
       as.write_cmp(rsp, r13);
       as.write_jg("opcode_end");
 
@@ -706,7 +719,6 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
     case 'v': { // move down
       as.write_test(r11, r11);
       as.write_jz("opcode_end");
-      // TODO: this assembles to r10d apparently; fix the assembler to use the right reg
       as.write_test(r10b, r10b, OperandSize::Byte);
       as.write_jnz("other_alignment");
 
@@ -727,9 +739,6 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
       this->write_jump_to_cell(iterator_pos, as, result_pos);
       break;
     }
-
-    // TODO HERE: convert the rest of this function to iterated opcodes. [ and ]
-    // are already partially done, but <>^v above are faulting and need work
 
     case '[': // turn left
       as.write_neg(r11);
@@ -799,6 +808,8 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
       break;
     }
 
+    // TODO HERE: convert the rest of this function to iterated opcodes
+
     default:
       throw invalid_argument(string_printf(
           "can\'t compile iterated character %c at (%zd, %zd)", opcode, target_pos.x, target_pos.y));
@@ -807,8 +818,16 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
   as.write_label("opcode_end");
   as.write_test(r10b, r10b, OperandSize::Byte);
   as.write_jnz("opcode_end_alignment_changed");
-  this->write_jump_to_cell(iterator_pos, as, target_pos.copy().move_forward());
+  this->write_jump_to_cell(iterator_pos, as, iterator_pos.copy().move_forward());
+
   as.write_label("opcode_end_alignment_changed");
+  this->write_jump_to_cell(iterator_pos, as,
+      iterator_pos.copy().move_forward().change_alignment());
+
+  as.write_label("opcode_end_zero_count_alignment_same");
+  this->write_jump_to_cell(iterator_pos, as, target_pos.copy().move_forward());
+
+  as.write_label("opcode_end_zero_count_alignment_changed");
   this->write_jump_to_cell(iterator_pos, as,
       target_pos.copy().move_forward().change_alignment());
 }
@@ -850,9 +869,10 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
         opcode = this->field.get(pos.x, pos.y);
 
         // remove the position token if the cell has one already
-        if (cell.next_position_token) {
-          this->token_to_position.erase(cell.next_position_token);
-          cell.next_position_token = 0;
+        for (auto it = cell.next_position_tokens.begin();
+             it != cell.next_position_tokens.end();
+             it = cell.next_position_tokens.erase(it)) {
+          this->token_to_position.erase(*it);
         }
 
         this->compile_opcode(as, pos, opcode);
@@ -1020,16 +1040,11 @@ const void* BefungeJITCompiler::dispatch_get_cell_code(BefungeJITCompiler* c,
   try {
     const void* code = c->compiled_cells.at(pos).code;
     if (code) {
-      fprintf(stderr, "[dispatch_get_cell_code] existed; x=%zd, y=%zd, dir=%s, ret=%p\n",
-          x, y, name_for_direction(dir), code);
       return code;
     }
   } catch (const out_of_range&) { }
 
-  const void* ret = c->compile_cell(pos);
-  fprintf(stderr, "[dispatch_get_cell_code] compiled; x=%zd, y=%zd, dir=%s, ret=%p\n",
-      x, y, name_for_direction(dir), ret);
-  return ret;
+  return c->compile_cell(pos);
 }
 
 int64_t BefungeJITCompiler::dispatch_field_read(BefungeJITCompiler* c,
@@ -1046,9 +1061,6 @@ const void* BefungeJITCompiler::dispatch_field_write(BefungeJITCompiler* c,
   if (y >= c->field.height()) {
     throw invalid_argument("field write out of horizontal range");
   }
-
-  fprintf(stderr, "[field_write] this=%p, token=%" PRIX64 ", x=%zd, y=%zd, value=%02" PRIX64 "\n",
-      c, return_position_token, x, y, value);
 
   c->field.set(x, y, value);
 
