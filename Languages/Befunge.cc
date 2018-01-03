@@ -53,8 +53,8 @@ void Field::set(ssize_t x, ssize_t y, char value) {
   }
   string& line = this->lines[y];
 
-  while (line.size() <= value) {
-    line.append(1, ' ');
+  while (line.size() <= x) {
+    line.push_back(' ');
   }
   line[x] = value;
 
@@ -160,6 +160,24 @@ Position& Position::turn_right() {
       break;
     case Direction::Down:
       this->dir = Direction::Left;
+      break;
+  }
+  return *this;
+}
+
+Position& Position::turn_around() {
+  switch (this->dir) {
+    case Direction::Left:
+      this->dir = Direction::Right;
+      break;
+    case Direction::Right:
+      this->dir = Direction::Left;
+      break;
+    case Direction::Up:
+      this->dir = Direction::Down;
+      break;
+    case Direction::Down:
+      this->dir = Direction::Up;
       break;
   }
   return *this;

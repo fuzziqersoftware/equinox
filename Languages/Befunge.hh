@@ -50,6 +50,7 @@ struct Position {
   Position& face(Direction dir);
   Position& turn_left();
   Position& turn_right();
+  Position& turn_around();
   Position& move_forward();
   Position& face_and_move(Direction dir);
   Position& change_alignment();
