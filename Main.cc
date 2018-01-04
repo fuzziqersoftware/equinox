@@ -40,6 +40,7 @@ int main(int argc, char* argv[]) {
 
   Language language;
   int optimize_level = 1;
+  uint8_t dimensions = 2;
   size_t memory_size = 0x100000; // 1MB
   size_t expansion_size = 0x10000; // 64KB
   size_t num_bad_options = 0;
@@ -82,8 +83,8 @@ int main(int argc, char* argv[]) {
       optimize_level = atoi(&argv[x][17]);
 
     // befunge options
-    } else if (!strcmp(argv[x], "--enable-debug-opcode")) {
-      enable_debug_opcode = true;
+    } else if (!strncmp(argv[x], "--dimensions=", 13)) {
+      dimensions = atoi(&argv[x][13]);
 
     // positional arguments
     } else if (!input_filename) {
@@ -126,10 +127,9 @@ Brainfuck can run in all modes. Options:\n\
       Level 2: Eliminate memory boundary checks.\n\
 \n\
 Befunge runs only in execute or interpret mode. Options:\n\
-  --enable-debug-opcode\n\
-      Enable the stack debug opcode. With this flag, the opcode Y causes the\n\
-      compiler to print the contents of the stack to stderr. Without this flag,\n\
-      the opcode Y causes an error.\n\
+  --dimensions=num\n\
+      Chooses the sublanguage to use. 1 for Unefunge, 2 for Befunge (default),\n\
+      3 for Trefunge.\n\
 ", argv[0], argv[0], argv[0]);
     return 1;
   }
@@ -147,12 +147,12 @@ Befunge runs only in execute or interpret mode. Options:\n\
       }
     } else if (language == Language::Befunge) {
       if (behavior == Behavior::Interpret) {
-        befunge_interpret(input_filename, enable_debug_opcode);
+        befunge_interpret(input_filename, dimensions, enable_debug_opcode);
       } else if (behavior == Behavior::Compile) {
         throw logic_error("befunge compiler not implemented");
       } else if (behavior == Behavior::Execute) {
         uint64_t debug_flags = (assembly ? 2 : 0) | (enable_debug_opcode ? 1 : 0);
-        BefungeJITCompiler(input_filename, debug_flags).execute();
+        BefungeJITCompiler(input_filename, dimensions, debug_flags).execute();
       }
     } else if (language == Language::Malbolge) {
       if (behavior == Behavior::Interpret) {
