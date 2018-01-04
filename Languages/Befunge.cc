@@ -11,47 +11,36 @@ using namespace std;
 
 
 
-const vector<Direction> all_directions({
-    Direction::Left, Direction::Up, Direction::Right, Direction::Down});
+Field::Field() : w(0), h(0) { }
 
-const char* name_for_direction(Direction d) {
-  switch (d) {
-    case Right:
-      return "Right";
-    case Left:
-      return "Left";
-    case Down:
-      return "Down";
-    case Up:
-      return "Up";
-  }
-  return "Unknown";
-}
-
-
-
-Field::Field() : w(0) { }
-
-char Field::get(ssize_t x, ssize_t y) const {
+char Field::get(ssize_t x, ssize_t y, ssize_t z) const {
   try {
-    return this->lines[this->wrap_y(y)].at(this->wrap_x(x));
+    return this->planes.at(this->wrap_z(z)).at(this->wrap_y(y)).at(this->wrap_x(x));
   } catch (const out_of_range&) {
     return ' ';
   }
 }
 
-void Field::set(ssize_t x, ssize_t y, char value) {
+void Field::set(ssize_t x, ssize_t y, ssize_t z, char value) {
   if (x < 0) {
     x = this->wrap_x(x);
   }
   if (y < 0) {
     y = this->wrap_y(y);
   }
-
-  while (this->lines.size() <= y) {
-    this->lines.emplace_back();
+  if (z < 0) {
+    z = this->wrap_z(z);
   }
-  string& line = this->lines[y];
+
+  while (this->planes.size() <= z) {
+    this->planes.emplace_back();
+  }
+  vector<string>& plane = this->planes[z];
+
+  while (plane.size() <= y) {
+    plane.emplace_back();
+  }
+  string& line = plane[y];
 
   while (line.size() <= x) {
     line.push_back(' ');
@@ -61,6 +50,9 @@ void Field::set(ssize_t x, ssize_t y, char value) {
   if (x >= this->w) {
     this->w = x + 1;
   }
+  if (y >= this->h) {
+    this->h = y + 1;
+  }
 }
 
 size_t Field::width() const {
@@ -68,7 +60,11 @@ size_t Field::width() const {
 }
 
 size_t Field::height() const {
-  return this->lines.size();
+  return this->h;
+}
+
+size_t Field::depth() const {
+  return this->planes.size();
 }
 
 ssize_t Field::wrap_x(ssize_t x) const {
@@ -80,27 +76,37 @@ ssize_t Field::wrap_x(ssize_t x) const {
 
 ssize_t Field::wrap_y(ssize_t y) const {
   while (y < 0) {
-    y += this->lines.size();
+    y += this->h;
   }
-  return y % static_cast<ssize_t>(this->lines.size());
+  return y % this->h;
+}
+
+ssize_t Field::wrap_z(ssize_t z) const {
+  while (z < 0) {
+    z += this->planes.size();
+  }
+  return z % static_cast<ssize_t>(this->planes.size());
 }
 
 Field Field::load(const string& filename) {
   string code = load_file(filename);
 
   Field f;
+  f.planes.emplace_back();
+  vector<string>& plane = f.planes.back();
+
   size_t line_start_offset = 0;
   size_t newline_offset = code.find('\n', line_start_offset);
   while (newline_offset != string::npos) {
     size_t line_length = newline_offset - line_start_offset;
-    f.lines.emplace_back(code.substr(line_start_offset, line_length));
+    plane.emplace_back(code.substr(line_start_offset, line_length));
     line_start_offset = newline_offset + 1;
     newline_offset = code.find('\n', line_start_offset);
   }
 
-  f.lines.emplace_back(code.substr(line_start_offset));
+  plane.emplace_back(code.substr(line_start_offset));
 
-  for (string& line : f.lines) {
+  for (string& line : plane) {
     if (!line.empty() && (line[line.size() - 1] == '\r')) {
       line.pop_back();
     }
@@ -108,101 +114,57 @@ Field Field::load(const string& filename) {
       f.w = line.size();
     }
   }
+  f.h = plane.size();
 
   return f;
 }
 
 
 
-Position::Position(size_t special_cell_id, bool stack_aligned) :
-    special_cell_id(special_cell_id), x(0), y(0), dir(Direction::Right),
-    stack_aligned(stack_aligned) { }
-Position::Position(ssize_t x, ssize_t y, Direction dir, bool stack_aligned) :
-    special_cell_id(0), x(x), y(y), dir(dir), stack_aligned(stack_aligned) { }
+Position::Position(uint8_t special_cell_id, bool stack_aligned) :
+    x(0), y(0), z(0), dx(0), dy(0), dz(0), stack_aligned(stack_aligned),
+    special_cell_id(special_cell_id) { }
+Position::Position(int64_t x, int64_t y, int64_t z, int64_t dx, int64_t dy,
+    int64_t dz, bool stack_aligned) : x(x), y(y), z(z), dx(dx), dy(dy), dz(dz),
+    stack_aligned(stack_aligned), special_cell_id(0) { }
 
 Position Position::copy() const {
   return *this;
 }
 
-Position& Position::face(Direction dir) {
-  this->dir = dir;
+Position& Position::face(ssize_t dx, ssize_t dy, ssize_t dz) {
+  this->dx = dx;
+  this->dy = dy;
+  this->dz = dz;
   return *this;
 }
 
 Position& Position::turn_left() {
-  switch (this->dir) {
-    case Direction::Left:
-      this->dir = Direction::Down;
-      break;
-    case Direction::Right:
-      this->dir = Direction::Up;
-      break;
-    case Direction::Up:
-      this->dir = Direction::Left;
-      break;
-    case Direction::Down:
-      this->dir = Direction::Right;
-      break;
-  }
+  ssize_t new_dy = -this->dx;
+  this->dx = this->dy;
+  this->dy = new_dy;
   return *this;
 }
 
 Position& Position::turn_right() {
-  switch (this->dir) {
-    case Direction::Left:
-      this->dir = Direction::Up;
-      break;
-    case Direction::Right:
-      this->dir = Direction::Down;
-      break;
-    case Direction::Up:
-      this->dir = Direction::Right;
-      break;
-    case Direction::Down:
-      this->dir = Direction::Left;
-      break;
-  }
+  ssize_t new_dy = this->dx;
+  this->dx = -this->dy;
+  this->dy = new_dy;
   return *this;
 }
 
 Position& Position::turn_around() {
-  switch (this->dir) {
-    case Direction::Left:
-      this->dir = Direction::Right;
-      break;
-    case Direction::Right:
-      this->dir = Direction::Left;
-      break;
-    case Direction::Up:
-      this->dir = Direction::Down;
-      break;
-    case Direction::Down:
-      this->dir = Direction::Up;
-      break;
-  }
+  this->dx *= -1;
+  this->dy *= -1;
+  this->dz *= -1;
   return *this;
 }
 
 Position& Position::move_forward() {
-  switch (this->dir) {
-    case Direction::Left:
-      this->x--;
-      break;
-    case Direction::Right:
-      this->x++;
-      break;
-    case Direction::Up:
-      this->y--;
-      break;
-    case Direction::Down:
-      this->y++;
-      break;
-  }
+  this->x += this->dx;
+  this->y += this->dy;
+  this->z += this->dz;
   return *this;
-}
-
-Position& Position::face_and_move(Direction dir) {
-  return this->face(dir).move_forward();
 }
 
 Position& Position::change_alignment() {
@@ -221,12 +183,22 @@ Position& Position::wrap_to_field(const Field& f) {
   return *this;
 }
 
+string Position::str() const {
+  if (this->special_cell_id) {
+    return string_printf("(Special, %zu)", this->special_cell_id);
+  }
+  return string_printf("(%zd, %zd, %zd, %zd, %zd, %zd, %s)", this->x, this->y,
+      this->z, this->dx, this->dy, this->dz,
+      this->stack_aligned ? "aligned" : "misaligned");
+}
+
 string Position::label() const {
   if (this->special_cell_id) {
     return string_printf("Special_%zu", this->special_cell_id);
   }
-  return string_printf("%zd_%zd_%s_%s", this->x, this->y,
-      name_for_direction(this->dir), this->stack_aligned ? "aligned" : "misaligned");
+  return string_printf("%zd_%zd_%zd_%zd_%zd_%zd_%s", this->x, this->y, this->z,
+      this->dx, this->dy, this->dz,
+      this->stack_aligned ? "aligned" : "misaligned");
 }
 
 bool Position::operator<(const Position& other) const {
@@ -245,9 +217,24 @@ bool Position::operator<(const Position& other) const {
   } else if (this->y > other.y) {
     return false;
   }
-  if (this->dir < other.dir) {
+  if (this->z < other.z) {
     return true;
-  } else if (this->dir > other.dir) {
+  } else if (this->z > other.z) {
+    return false;
+  }
+  if (this->dx < other.dx) {
+    return true;
+  } else if (this->dx > other.dx) {
+    return false;
+  }
+  if (this->dy < other.dy) {
+    return true;
+  } else if (this->dy > other.dy) {
+    return false;
+  }
+  if (this->dz < other.dz) {
+    return true;
+  } else if (this->dz > other.dz) {
     return false;
   }
   return (this->stack_aligned < other.stack_aligned);

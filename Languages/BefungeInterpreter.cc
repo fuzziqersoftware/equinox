@@ -42,16 +42,21 @@ struct Stack {
 
 
 
-void befunge_interpret(const string& filename, bool enable_debug_opcode) {
+void befunge_interpret(const string& filename, uint8_t dimensions,
+    bool enable_debug_opcode) {
+  if (dimensions != 2) {
+    throw invalid_argument("interpreter only supports 2 dimensions currently");
+  }
+
   Field field = Field::load(filename);
 
   Stack stack;
-  Position pos(0, 0, Direction::Right);
+  Position pos(0, 0, 0, 1, 0, 0);
 
   for (;;) {
     int16_t opcode = -1;
     try {
-      opcode = field.get(pos.x, pos.y);
+      opcode = field.get(pos.x, pos.y, pos.z);
     } catch (const out_of_range&) { }
 
     switch (opcode) {
@@ -119,16 +124,16 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
         }
 
         case '<': // move left
-          pos.face(Direction::Left);
+          pos.face(-1, 0, 0);
           break;
         case '>': // move right
-          pos.face(Direction::Right);
+          pos.face(1, 0, 0);
           break;
         case '^': // move up
-          pos.face(Direction::Up);
+          pos.face(0, -1, 0);
           break;
         case 'v': // move down
-          pos.face(Direction::Down);
+          pos.face(0, 1, 0);
           break;
         case '[': // turn left
           pos.turn_left();
@@ -138,21 +143,34 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
           break;
 
         case '?': // move randomly
-          pos.face(static_cast<Direction>(rand() & 3));
+          switch (rand() & 3) {
+            case 0:
+              pos.face(-1, 0, 0);
+              break;
+            case 1:
+              pos.face(1, 0, 0);
+              break;
+            case 2:
+              pos.face(0, -1, 0);
+              break;
+            case 3:
+              pos.face(0, 1, 0);
+              break;
+          }
           break;
 
         case '_': // right if zero, left if not
-          pos.face(stack.pop() ? Direction::Left : Direction::Right);
+          pos.face(stack.pop() ? -1 : 1, 0, 0);
           break;
 
         case '|': // down if zero, up if not
-          pos.face(stack.pop() ? Direction::Up : Direction::Down);
+          pos.face(0, stack.pop() ? -1 : 1, 0);
           break;
 
         case '\"': { // push an entire string
           pos.move_forward();
           for (;;) {
-            int16_t value = field.get(pos.x, pos.y);
+            int16_t value = field.get(pos.x, pos.y, pos.z);
             if (value == '\"') {
               break;
             }
@@ -169,7 +187,7 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
         case ';': { // skip over a segment
           pos.move_forward();
           for (;;) {
-            int16_t value = field.get(pos.x, pos.y);
+            int16_t value = field.get(pos.x, pos.y, pos.z);
             if (value == ';') {
               break;
             }
@@ -219,7 +237,7 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
           int64_t y = stack.pop();
           int64_t x = stack.pop();
           int64_t v = stack.pop();
-          field.set(x, y, v);
+          field.set(x, y, 0, v);
           break;
         }
 
@@ -227,7 +245,7 @@ void befunge_interpret(const string& filename, bool enable_debug_opcode) {
           try {
             int64_t y = stack.pop();
             int64_t x = stack.pop();
-            stack.push(field.get(x, y));
+            stack.push(field.get(x, y, 0));
           } catch (const out_of_range&) {
             stack.push(' ');
           }

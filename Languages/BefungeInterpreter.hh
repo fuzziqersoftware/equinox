@@ -3,4 +3,5 @@
 #include <string>
 
 
-void befunge_interpret(const std::string& filename, bool enable_debug_opcode);
+void befunge_interpret(const std::string& filename, uint8_t dimensions,
+	bool enable_debug_opcode);

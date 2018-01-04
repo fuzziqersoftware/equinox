@@ -27,12 +27,15 @@ public:
   };
 
   explicit BefungeJITCompiler(const std::string& filename,
-      uint64_t debug_flags = 0);
+      uint8_t dimensions = 2, uint64_t debug_flags = 0);
   ~BefungeJITCompiler() = default;
 
   void execute();
 
 private:
+
+  void check_dimensions(uint8_t required_dimensions, const Position& where,
+      int16_t opcode) const;
 
   // TODO: recycle old buffer blocks by keeping them in a free list
 
@@ -59,28 +62,27 @@ private:
       const MemoryReference& function_ref, bool stack_aligned);
   void write_jump_to_cell(const Position& current_pos, AMD64Assembler& as,
       const Position& next_pos);
-  void write_direction_jump_table(AMD64Assembler& as,
-      const std::string& label_name, const Position& pos,
-      const std::vector<Direction>& dirs);
+  void write_jump_table(AMD64Assembler& as, const std::string& label_name,
+      const Position& pos, const std::vector<Position>& positions);
 
   void add_common_object(const std::string& name, const void* o);
   MemoryReference common_object_reference(const std::string& name);
 
-  static const void* dispatch_compile_cell(BefungeJITCompiler* c, ssize_t x,
-      ssize_t y, Direction dir, bool stack_aligned);
-  static const void* dispatch_get_cell_code(BefungeJITCompiler* c, ssize_t x,
-      ssize_t y, Direction dir, bool stack_aligned);
+  static const void* dispatch_compile_cell(BefungeJITCompiler* c, const Position* pos);
+  static const void* dispatch_get_cell_code(BefungeJITCompiler* c, const Position* pos);
 
-  static int64_t dispatch_field_read(BefungeJITCompiler* c, ssize_t x,
-      ssize_t y);
+  static int64_t dispatch_field_read(BefungeJITCompiler* c, int64_t x,
+      int64_t y, int64_t z);
   static const void* dispatch_field_write(BefungeJITCompiler* c,
-      int64_t return_position_token, ssize_t x, ssize_t y, int64_t value);
+      int64_t return_position_token, int64_t x, int64_t y, int64_t z,
+      int64_t value);
 
   static void dispatch_print_stack_contents(const int64_t* stack_top,
       size_t count);
 
   static void dispatch_throw_error(const char* error_string);
 
+  uint8_t dimensions;
   uint64_t debug_flags;
 
   Field field;
@@ -93,6 +95,8 @@ private:
   std::unordered_map<std::string, size_t> common_object_index;
 
   CodeBuffer buf;
-  const void* dispatch_compile_cell_ret_aligned;
-  const void* dispatch_compile_cell_ret_misaligned;
+  const void* jump_return_40;
+  const void* jump_return_38;
+  const void* jump_return_8;
+  const void* jump_return_0;
 };
