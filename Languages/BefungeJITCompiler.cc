@@ -4,6 +4,14 @@ using namespace std;
 
 
 
+// the compiled code follows the system v calling convention, with the following
+// special registers:
+// r12 = common object ptr
+// r13 = stack end ptr - 8 (address of the last item on the stack)
+// r14 = storage offset ptr
+
+
+
 BefungeJITCompiler::BefungeJITCompiler(const string& filename,
     uint8_t dimensions, uint64_t debug_flags) : dimensions(dimensions),
     debug_flags(debug_flags), field(Field::load(filename)), next_token(1) {
@@ -72,8 +80,8 @@ BefungeJITCompiler::BefungeJITCompiler(const string& filename,
       reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_field_read));
   this->add_common_object("dispatch_field_write",
       reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_field_write));
-  this->add_common_object("dispatch_print_stack_contents",
-      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_print_stack_contents));
+  this->add_common_object("dispatch_print_state",
+      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_print_state));
   this->add_common_object("dispatch_throw_error",
       reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_throw_error));
   this->add_common_object("fputs", reinterpret_cast<const void*>(&fputs));
@@ -130,6 +138,207 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
     case -1:
       throw logic_error(string_printf(
           "attempted to compile boundary cell %zd %zd", pos.x, pos.y));
+
+    case '{': // open a new stack
+      // secondary stacks are implemented by pushing r13 and resetting it to
+      // create a "new" empty stack
+
+      // before this operation, the stack is:
+      // count e1 e2 ... en f1 f2 ... r13=fn
+      // after this operation, the stacks are:
+      // e1 e2 ... r13=en oldr13 [[oldSOz] oldSOy] oldSOx f1 f2 ... fn
+
+      // TODO: currently this is O(n); can we make it faster somehow?
+      // (also with '}')
+      as.write_cmp(rsp, r13);
+      as.write_jg("stack_empty");
+
+      // get the count and make space for the storage offset on the second stack
+      as.write_mov(rcx, MemoryReference(rsp, 0)); // item count to copy
+      as.write_cmp(rcx, 0);
+      as.write_jge("count_nonnegative");
+      // TODO: deal with the case where the count is negative
+      as.write_mov(rdi, reinterpret_cast<int64_t>(
+          "open-block opcode executed with negative count"));
+      as.write_call(this->common_object_reference("dispatch_throw_error"));
+      as.write_label("count_nonnegative");
+
+      as.write_sub(rsp, 8 * this->dimensions);
+      as.write_lea(rcx, MemoryReference(rsp, -8, rcx, 8)); // new r13 value
+
+      // can't copy more items than exist on the stack
+      // TODO: implement this. it should push extra zeroes instead of failing
+      as.write_cmp(rcx, r13);
+      as.write_jle("count_not_excessive");
+      as.write_mov(rdi, reinterpret_cast<int64_t>(
+          "open-block opcode executed with count greater than stack size"));
+      as.write_call(this->common_object_reference("dispatch_throw_error"));
+      as.write_label("count_not_excessive");
+
+      as.write_mov(rdx, rsp); // pointer to item being written
+      as.write_label("copy_again");
+      as.write_mov(rax, MemoryReference(rdx, 8 + 8 * this->dimensions));
+      as.write_mov(MemoryReference(rdx, 0), rax);
+      as.write_add(rdx, 8);
+      as.write_cmp(rdx, rcx);
+      as.write_jle("copy_again");
+
+      // now rdx points to the element past the end of the new stack. here we
+      // should write the old r13 value (to restore the old setack later) and
+      // the current storage offset (so it's on the top of the second stack)
+
+      // write the old r13 value between the stacks
+      as.write_mov(MemoryReference(rdx, 0), r13);
+
+      // copy the storage offset onto the top of the second stack
+      // TODO: this should probably be a loop, lolz. but maybe it's more clear
+      // like this
+      if (this->dimensions == 1) {
+        as.write_mov(rax, MemoryReference(r14, 0));
+        as.write_mov(MemoryReference(rdx, 8), rax);
+      } else if (this->dimensions == 2) {
+        as.write_mov(rax, MemoryReference(r14, 0));
+        as.write_mov(MemoryReference(rdx, 16), rax);
+        as.write_mov(rax, MemoryReference(r14, 8));
+        as.write_mov(MemoryReference(rdx, 8), rax);
+      } else { // 3D
+        as.write_mov(rax, MemoryReference(r14, 0));
+        as.write_mov(MemoryReference(rdx, 24), rax);
+        as.write_mov(rax, MemoryReference(r14, 8));
+        as.write_mov(MemoryReference(rdx, 16), rax);
+        as.write_mov(rax, MemoryReference(r14, 16));
+        as.write_mov(MemoryReference(rdx, 8), rax);
+      }
+
+      // set the storage offset to the next cell position
+      {
+        Position next_pos = pos.copy().move_forward();
+        as.write_mov(MemoryReference(r14, 0), next_pos.x);
+        if (this->dimensions > 1) {
+          as.write_mov(MemoryReference(r14, 8), next_pos.y);
+          if (this->dimensions > 1) {
+            as.write_mov(MemoryReference(r14, 16), next_pos.z);
+          }
+        }
+      }
+
+      // set the end-of-stack pointer appropriately
+      as.write_mov(r13, rcx);
+
+      // alignment doesn't change in this case because we popped one item (the
+      // count) and pushed one "item" (the previous r13 value)
+      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+
+      {
+        as.write_label("stack_empty");
+
+        Position next_pos = pos.copy().move_forward();
+        if (this->dimensions == 1) {
+          as.write_push(MemoryReference(r14, 0));
+        } else if (this->dimensions == 2) {
+          as.write_push(MemoryReference(r14, 0));
+          as.write_push(MemoryReference(r14, 8));
+          next_pos.change_alignment();
+        } else { // 3D
+          as.write_push(MemoryReference(r14, 0));
+          as.write_push(MemoryReference(r14, 8));
+          as.write_push(MemoryReference(r14, 16));
+        }
+        as.write_push(r13);
+        as.write_lea(r13, MemoryReference(rsp, -8));
+        this->write_jump_to_cell(pos, as, next_pos);
+      }
+      break;
+
+    case '}':
+      // first check if the stack stack is empty. if so, reflect
+      as.write_lea(r8, MemoryReference(rbp, -7 * 8));
+      as.write_cmp(r13, r8);
+      as.write_jl("second_stack_exists");
+      this->write_jump_to_cell(pos, as, pos.copy().turn_around().move_forward());
+      as.write_label("second_stack_exists");
+
+      // before this operation, the stacks are:
+      // count e1 e2 ... en f1 f2 ... r13=fn oldr13 [[oldSOz] oldSOy] oldSOx g1 g2 ... gn
+      // after this operation, the stack is:
+      // e1 e2 ... en g1 g2 ... r13=gn
+
+      // get the count of items to copy
+      as.write_cmp(rsp, r13);
+      as.write_jle("stack_one_item");
+      as.write_label("stack_empty");
+      as.write_xor(r11, r11);
+      as.write_jmp("transfer_items");
+      as.write_label("stack_one_item");
+      as.write_pop(r11);
+
+      as.write_label("transfer_items");
+
+      // restore the old storage offset
+      if (this->dimensions == 1) {
+        as.write_mov(rax, MemoryReference(r13, 16));
+        as.write_mov(MemoryReference(r14, 0), rax);
+      } else if (this->dimensions == 2) {
+        as.write_mov(rax, MemoryReference(r13, 16));
+        as.write_mov(MemoryReference(r14, 8), rax);
+        as.write_mov(rax, MemoryReference(r13, 24));
+        as.write_mov(MemoryReference(r14, 0), rax);
+      } else { // 3D
+        as.write_mov(rax, MemoryReference(r13, 16));
+        as.write_mov(MemoryReference(r14, 16), rax);
+        as.write_mov(rax, MemoryReference(r13, 24));
+        as.write_mov(MemoryReference(r14, 8), rax);
+        as.write_mov(rax, MemoryReference(r13, 32));
+        as.write_mov(MemoryReference(r14, 0), rax);
+      }
+
+      // TODO: deal with the case where the count is negative
+      as.write_cmp(r11, 0);
+      as.write_jge("count_nonnegative");
+      as.write_mov(rdi, reinterpret_cast<int64_t>(
+          "close-block opcode executed with negative count"));
+      as.write_call(this->common_object_reference("dispatch_throw_error"));
+      as.write_label("count_nonnegative");
+
+      // check if the count is greater than the stack size.
+      // TODO: implement this. it should push extra zeroes
+      as.write_lea(rax, MemoryReference(r13, 8));
+      as.write_sub(rax, rsp);
+      as.write_shr(rax, 3);
+      as.write_cmp(r11, rax);
+      as.write_jle("count_not_excessive");
+      as.write_mov(rdi, reinterpret_cast<int64_t>(
+          "close-block opcode executed with count greater than stack size"));
+      as.write_call(this->common_object_reference("dispatch_throw_error"));
+      as.write_label("count_not_excessive");
+
+      // copy items from the top stack to the second stack.
+      // rdx = dest ptr, rcx = src ptr, r11 = count remaining
+      as.write_lea(rdx, MemoryReference(r13, (this->dimensions + 2) * 8));
+      as.write_lea(rcx, MemoryReference(rsp, 0, r11, 8));
+
+      // we're about to overwrite the old r13 value, so load it now
+      as.write_mov(r13, MemoryReference(r13, 8));
+
+      as.write_label("copy_again");
+      as.write_sub(rdx, 8);
+      as.write_sub(rcx, 8);
+      as.write_mov(rax, MemoryReference(rcx, 0));
+      as.write_mov(MemoryReference(rdx, 0), rax);
+      as.write_dec(r11);
+      as.write_test(r11, r11);
+      as.write_jnz("copy_again");
+
+      as.write_mov(rsp, rdx);
+
+      as.write_test(rsp, 8);
+      as.write_jz("stack_aligned");
+      this->write_jump_to_cell(pos, as,
+          pos.copy().move_forward().set_aligned(false));
+      as.write_label("stack_aligned");
+      this->write_jump_to_cell(pos, as,
+          pos.copy().move_forward().set_aligned(true));
+      break;
 
     case '0':
     case '1':
@@ -374,15 +583,15 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       Position new_pos = pos.copy().change_alignment();
 
       if (opcode == '_') {
-        this->write_jump_table(as, "jump_table", new_pos,
+        this->write_jump_table(as, "jump_table", pos,
             {new_pos.copy().face(1, 0, 0).move_forward(),
              new_pos.copy().face(-1, 0, 0).move_forward()});
       } else if (opcode == '|') {
-        this->write_jump_table(as, "jump_table", new_pos,
+        this->write_jump_table(as, "jump_table", pos,
             {new_pos.copy().face(0, 1, 0).move_forward(),
              new_pos.copy().face(0, -1, 0).move_forward()});
       } else { // 'm'
-        this->write_jump_table(as, "jump_table", new_pos,
+        this->write_jump_table(as, "jump_table", pos,
             {new_pos.copy().face(0, 0, 1).move_forward(),
              new_pos.copy().face(0, 0, -1).move_forward()});
       }
@@ -518,6 +727,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
 
     case 'n': // clear stack entirely
       as.write_lea(rsp, MemoryReference(r13, 8));
+      as.write_test(rsp, 8);
+      as.write_jz("stack_aligned");
+      this->write_jump_to_cell(pos, as,
+          pos.copy().move_forward().set_aligned(false));
+      as.write_label("stack_aligned");
       this->write_jump_to_cell(pos, as,
           pos.copy().move_forward().set_aligned(true));
       break;
@@ -549,7 +763,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
 
       as.write_xor(rdi, rdi);
       this->write_function_call(as, this->common_object_reference("putchar"),
-          !pos.stack_aligned);
+          pos.stack_aligned);
       this->write_jump_to_cell(pos, as, pos.copy().move_forward());
 
       as.write_label("stack_sufficient");
@@ -617,6 +831,149 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       break;
     }
 
+    case 'x': { // set delta
+      as.write_cmp(rsp, r13);
+      as.write_jg("stack_empty");
+
+      // all cases end up calling a function with this as the first arg
+      as.write_mov(rdi, this->common_object_reference("this"));
+
+      if (this->dimensions == 1) {
+        as.write_pop(r8);
+        as.write_push(!pos.stack_aligned);
+        as.write_push(0); // dz
+        as.write_push(0); // dy
+        as.write_push(r8); // dx
+        as.write_push(0); // z
+        as.write_push(0); // y
+        as.write_add(r8, pos.x);
+        as.write_push(r8); // x
+
+        as.write_mov(rsi, rsp);
+        if (pos.stack_aligned) {
+          as.write_push(this->common_object_reference("jump_return_38"));
+        } else {
+          as.write_sub(rsp, 8);
+          as.write_push(this->common_object_reference("jump_return_40"));
+        }
+        as.write_jmp(this->common_object_reference("dispatch_get_cell_code"));
+
+      } else {
+        as.write_jl("stack_two_or_more_items");
+
+        as.write_label("stack_one_item");
+        as.write_pop(r8);
+        as.write_push(!pos.stack_aligned);
+        if (this->dimensions == 2) {
+          as.write_push(0); // dz
+          as.write_push(r8); // dy
+        } else { // 3D
+          as.write_push(r8); // dz
+          as.write_push(0); // dy
+        }
+        as.write_push(0); // dx
+        if (this->dimensions == 2) {
+          as.write_push(0); // z
+          as.write_add(r8, pos.y);
+          as.write_push(r8); // y
+        } else { // 3D
+          as.write_add(r8, pos.x);
+          as.write_push(r8); // z
+          as.write_push(pos.y); // y
+        }
+        as.write_push(pos.x); // x
+
+        as.write_mov(rsi, rsp);
+        if (pos.stack_aligned) {
+          as.write_push(this->common_object_reference("jump_return_38"));
+        } else {
+          as.write_sub(rsp, 8);
+          as.write_push(this->common_object_reference("jump_return_40"));
+        }
+        as.write_jmp(this->common_object_reference("dispatch_get_cell_code"));
+
+        as.write_label("stack_two_or_more_items");
+        as.write_pop(r10);
+        as.write_pop(r9);
+        if (this->dimensions == 2) {
+          as.write_push(pos.stack_aligned);
+          as.write_push(0); // dz
+          as.write_push(r10); // dy
+          as.write_push(r9); // dx
+          as.write_push(0); // z
+          as.write_add(r10, pos.y);
+          as.write_push(r10); // y
+          as.write_add(r9, pos.x);
+          as.write_push(r9); // x
+
+          as.write_mov(rsi, rsp);
+          if (!pos.stack_aligned) {
+            as.write_push(this->common_object_reference("jump_return_38"));
+          } else {
+            as.write_sub(rsp, 8);
+            as.write_push(this->common_object_reference("jump_return_40"));
+          }
+          as.write_jmp(this->common_object_reference("dispatch_get_cell_code"));
+
+        } else { // 3D
+          as.write_cmp(rsp, r13);
+          as.write_jle("stack_three_or_more_items");
+
+          as.write_label("stack_two_items");
+          as.write_push(pos.stack_aligned);
+          as.write_push(r10); // dz
+          as.write_push(r9); // dy
+          as.write_push(0); // dx
+          as.write_add(r10, pos.z);
+          as.write_push(r10); // z
+          as.write_add(r9, pos.y);
+          as.write_push(r9); // y
+          as.write_push(pos.x); // x
+
+          as.write_mov(rsi, rsp);
+          if (!pos.stack_aligned) {
+            as.write_push(this->common_object_reference("jump_return_38"));
+          } else {
+            as.write_sub(rsp, 8);
+            as.write_push(this->common_object_reference("jump_return_40"));
+          }
+          as.write_jmp(this->common_object_reference("dispatch_get_cell_code"));
+
+          as.write_label("stack_three_or_more_items");
+          as.write_pop(r8);
+          as.write_push(pos.stack_aligned);
+          as.write_push(r10); // dz
+          as.write_push(r9); // dy
+          as.write_push(r8); // dx
+          as.write_add(r10, pos.z);
+          as.write_push(r10); // z
+          as.write_add(r9, pos.y);
+          as.write_push(r9); // y
+          as.write_add(r8, pos.x);
+          as.write_push(r8); // x
+
+          as.write_mov(rsi, rsp);
+          if (pos.stack_aligned) {
+            as.write_push(this->common_object_reference("jump_return_38"));
+          } else {
+            as.write_sub(rsp, 8);
+            as.write_push(this->common_object_reference("jump_return_40"));
+          }
+          as.write_jmp(this->common_object_reference("dispatch_get_cell_code"));
+        }
+      }
+
+      // it's an error to execute 'x' with an empty stack - this would set
+      // dx = dy = dz = 0, so execution would loop forever on this cell. we
+      // raise an error instead.
+      as.write_label("stack_empty");
+      as.write_mov(rdi, reinterpret_cast<int64_t>(
+          "cannot execute x opcode on empty stack"));
+      this->write_function_call(as, this->common_object_reference("dispatch_throw_error"),
+          false);
+      break;
+    }
+
     case ';': { // skip everything until the next ';'
       Position char_pos = pos.copy().move_forward();
       for (;;) {
@@ -655,6 +1012,9 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       // all cases end up calling a function with this first arg
       as.write_mov(rdi, this->common_object_reference("this"));
 
+      // TODO: reduce ugly code duplication below
+      // TODO: use storage offset in this command and in 'g'
+
       // since we need 3 values from the stack, there are 4 cases here
       as.write_cmp(rsp, r13);
       as.write_jl("stack_two_or_more_items");
@@ -662,67 +1022,81 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
 
       // stack empty
       as.write_label("stack_empty");
-      as.write_xor(rdx, rdx); // x
-      as.write_xor(rcx, rcx); // y
-      as.write_xor(r8, r8); // z
+      as.write_mov(rdx, MemoryReference(r14, 0)); // x
+      as.write_mov(rcx, MemoryReference(r14, 8)); // y
+      as.write_mov(r8, MemoryReference(r14, 16)); // z
       as.write_xor(r9, r9); // value
       as.write_jmp("call_same_alignment");
 
       // stack has 1 item
       as.write_label("stack_one_item");
       as.write_pop(rdx); // x
-      as.write_xor(rcx, rcx); // y
-      as.write_xor(r8, r8); // z
+      as.write_add(rdx, MemoryReference(r14, 0)); // x
+      as.write_mov(rcx, MemoryReference(r14, 8)); // y
+      as.write_mov(r8, MemoryReference(r14, 16)); // z
       as.write_xor(r9, r9); // value
       as.write_jmp("call_other_alignment");
 
       // stack has 2 or more items; pop the first 2 and check again. but if this
       // is one-dimensional, we only need two arguments (hooray)
       as.write_label("stack_two_or_more_items");
-      as.write_pop(rcx); // x
       if (this->dimensions == 1) {
-        as.write_xor(rdx, rdx); // y
-        as.write_xor(r8, r8); // z
+        as.write_pop(rdx); // x
+        as.write_add(rdx, MemoryReference(r14, 0)); // x
+        as.write_mov(rcx, MemoryReference(r14, 8)); // y
+        as.write_mov(r8, MemoryReference(r14, 16)); // z
         as.write_pop(r9); // value
         as.write_jmp("call_same_alignment");
 
       } else {
-        as.write_pop(rdx); // y
-        as.write_cmp(rsp, r13);
         if (this->dimensions == 2) {
+          as.write_pop(rcx); // y
+          as.write_add(rcx, MemoryReference(r14, 8)); // y
+          as.write_pop(rdx); // x
+          as.write_add(rdx, MemoryReference(r14, 0)); // x
+
+          as.write_cmp(rsp, r13);
           as.write_jle("stack_three_or_more_items");
 
           // stack has no more items after the popped two
           as.write_label("stack_two_items");
-          as.write_xor(r8, r8); // z
+          as.write_mov(r8, MemoryReference(r14, 16)); // z
           as.write_xor(r9, r9); // value
           as.write_jmp("call_same_alignment");
 
           // stack has one item remaining after the popped two
           as.write_label("stack_three_or_more_items");
-          as.write_xor(r8, r8); // z
+          as.write_mov(r8, MemoryReference(r14, 16)); // z
           as.write_pop(r9); // value
           as.write_jmp("call_other_alignment");
 
         } else { // dimensions == 3
+          as.write_pop(r8); // z
+          as.write_add(r8, MemoryReference(r14, 16)); // z
+          as.write_pop(rcx); // y
+          as.write_add(rcx, MemoryReference(r14, 8)); // y
+
+          as.write_cmp(rsp, r13);
           as.write_jl("stack_four_or_more_items");
           as.write_je("stack_three_items");
 
           // stack has no more items after the popped two
           as.write_label("stack_two_items");
-          as.write_xor(r8, r8); // z
+          as.write_xor(rdx, rdx); // x
           as.write_xor(r9, r9); // value
           as.write_jmp("call_same_alignment");
 
           // stack has one item remaining after the popped two
           as.write_label("stack_three_items");
-          as.write_pop(r8); // z
+          as.write_pop(rdx); // x
+          as.write_add(rdx, MemoryReference(r14, 0)); // x
           as.write_xor(r9, r9); // value
           as.write_jmp("call_other_alignment");
 
           // stack has two or more items remaining after the popped two
           as.write_label("stack_four_or_more_items");
-          as.write_pop(r8); // z
+          as.write_pop(rdx); // x
+          as.write_add(rdx, MemoryReference(r14, 0)); // x
           as.write_pop(r9); // value
           as.write_jmp("call_same_alignment");
         }
@@ -773,27 +1147,24 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       }
 
       as.write_label("stack_empty");
-      as.write_xor(rsi, rsi);
-      as.write_xor(rdx, rdx);
-      as.write_xor(rcx, rcx);
+      as.write_mov(rsi, MemoryReference(r14, 0));
+      as.write_mov(rdx, MemoryReference(r14, 8));
+      as.write_mov(rcx, MemoryReference(r14, 16));
       this->write_function_call(as,
           this->common_object_reference("dispatch_field_read"), pos.stack_aligned);
       as.write_push(rax);
       this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
 
       as.write_label("stack_one_item");
+      as.write_mov(rsi, MemoryReference(r14, 0));
+      as.write_mov(rdx, MemoryReference(r14, 8));
+      as.write_mov(rcx, MemoryReference(r14, 16));
       if (this->dimensions == 1) {
-        as.write_mov(rsi, MemoryReference(rsp, 0));
-        as.write_xor(rdx, rdx);
-        as.write_xor(rcx, rcx);
+        as.write_add(rsi, MemoryReference(rsp, 0));
       } else if (this->dimensions == 2) {
-        as.write_xor(rsi, rsi);
-        as.write_mov(rdx, MemoryReference(rsp, 0));
-        as.write_xor(rcx, rcx);
+        as.write_add(rdx, MemoryReference(rsp, 0));
       } else {
-        as.write_xor(rsi, rsi);
-        as.write_xor(rdx, rdx);
-        as.write_mov(rcx, MemoryReference(rsp, 0));
+        as.write_add(rcx, MemoryReference(rsp, 0));
       }
       this->write_function_call(as, 
           this->common_object_reference("dispatch_field_read"), pos.stack_aligned);
@@ -802,9 +1173,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
 
       if (this->dimensions == 2) {
         as.write_label("stack_two_or_more_items");
-        as.write_xor(rcx, rcx); // z
+        as.write_mov(rcx, MemoryReference(r14, 16)); // z
         as.write_pop(rdx); // y
+        as.write_add(rdx, MemoryReference(r14, 8)); // y
         as.write_mov(rsi, MemoryReference(rsp, 0)); // x
+        as.write_add(rdx, MemoryReference(r14, 0)); // x
         this->write_function_call(as, 
             this->common_object_reference("dispatch_field_read"), !pos.stack_aligned);
         as.write_mov(MemoryReference(rsp, 0), rax);
@@ -813,13 +1186,15 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       } else {
         as.write_label("stack_two_or_more_items");
         as.write_pop(rcx); // z
+        as.write_add(rcx, MemoryReference(r14, 16)); // z
         as.write_pop(rdx); // y
+        as.write_add(rdx, MemoryReference(r14, 8)); // y
 
         as.write_cmp(rsp, r13);
         as.write_jle("stack_three_or_more_items");
 
         as.write_label("stack_two_items");
-        as.write_xor(rsi, rsi);
+        as.write_mov(rsi, MemoryReference(r14, 0));
         this->write_function_call(as, 
             this->common_object_reference("dispatch_field_read"), pos.stack_aligned);
         as.write_push(rax);
@@ -827,6 +1202,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
 
         as.write_label("stack_three_or_more_items");
         as.write_mov(rsi, MemoryReference(rsp, 0)); // x
+        as.write_add(rsi, MemoryReference(r14, 0)); // x
         this->write_function_call(as, 
             this->common_object_reference("dispatch_field_read"), pos.stack_aligned);
         as.write_mov(MemoryReference(rsp, 0), rax);
@@ -853,6 +1229,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       break;
 
     case '@': // end program
+      as.write_mov(r14, MemoryReference(rbp, -0x18));
       as.write_mov(r13, MemoryReference(rbp, -0x10));
       as.write_mov(r12, MemoryReference(rbp, -0x08));
       as.write_mov(rsp, rbp);
@@ -866,7 +1243,18 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         as.write_lea(rsi, MemoryReference(r13, 8));
         as.write_sub(rsi, rdi);
         as.write_shr(rsi, 3);
-        this->write_function_call(as, this->common_object_reference("dispatch_print_stack_contents"), pos.stack_aligned);
+        as.write_push(pos.stack_aligned);
+        as.write_push(pos.dz);
+        as.write_push(pos.dy);
+        as.write_push(pos.dx);
+        as.write_push(pos.z);
+        as.write_push(pos.y);
+        as.write_push(pos.x);
+        as.write_mov(rdx, rsp);
+        as.write_mov(rcx, r14);
+        this->write_function_call(as,
+            this->common_object_reference("dispatch_print_state"), !pos.stack_aligned);
+        as.write_add(rsp, 7 * 8);
         this->write_jump_to_cell(pos, as, pos.copy().move_forward());
         break;
       }
@@ -955,25 +1343,29 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
       break;
 
     case ',': // pop and print as ascii characters
-      // because we're calling another function, we have to expect r0 and r11 to
-      // get destroyed. so we'll save them in r14 and r15 in this implementation
+      // we'll pop n items off the stack, so keep track of alignment
+      as.write_xor(r10b, r11b, OperandSize::Byte);
+      as.write_and(r10b, 1, OperandSize::Byte);
+
+      // because we're calling another function, we have to expect r10/r11 to
+      // get destroyed. so we'll save them in rbx and r15 in this implementation
       as.write_push(r10);
-      as.write_push(r14);
+      as.write_push(rbx);
       as.write_push(r15);
+      as.write_lea(rbx, MemoryReference(rsp, 0x18));
       if (iterator_pos.stack_aligned) {
         as.write_sub(rsp, 8);
       }
 
-      // r14 = current stack item ptr; r15 = past-the-last stack item ptr
-      as.write_lea(r14, MemoryReference(rsp, 0x10));
-      as.write_lea(r15, MemoryReference(r14, 0, r11, 8));
+      // rbx = current stack item ptr; r15 = past-the-last stack item ptr
+      as.write_lea(r15, MemoryReference(rbx, 0, r11, 8));
 
       as.write_label("iterate_again");
-      as.write_cmp(r14, r15);
+      as.write_cmp(rbx, r15);
       as.write_je("iterate_done");
-      as.write_mov(rdi, MemoryReference(r14, 0));
+      as.write_mov(rdi, MemoryReference(rbx, 0));
       as.write_call(this->common_object_reference("putchar"));
-      as.write_add(r14, 8);
+      as.write_add(rbx, 8);
       as.write_jmp("iterate_again");
       as.write_label("iterate_done");
 
@@ -984,7 +1376,7 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
         as.write_add(rsp, 8);
       }
       as.write_mov(r15, MemoryReference(rsp, 0x00));
-      as.write_mov(r14, MemoryReference(rsp, 0x08));
+      as.write_mov(rbx, MemoryReference(rsp, 0x08));
       as.write_mov(r10, MemoryReference(rsp, 0x10));
       as.write_mov(rsp, r8);
       break;
@@ -1219,6 +1611,10 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
   set<Position> pending_positions({cell_pos});
   while (!pending_positions.empty()) {
     const Position pos = pending_positions.begin()->copy();
+    if (!pos.dx && !pos.dy && !pos.dz && !pos.special_cell_id) {
+      throw invalid_argument("cannot compile position: " + pos.str());
+    }
+
     pending_positions.erase(pending_positions.begin());
     CompiledCell& cell = this->compiled_cells[pos];
 
@@ -1234,15 +1630,23 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
         as.write_push(rbp);
         as.write_mov(rbp, rsp);
 
-        // special registers:
-        // r12 = common object ptr
-        // r13 = stack end ptr - 8 (address of top item on the stack)
         as.write_push(r12);
         as.write_mov(r12, reinterpret_cast<int64_t>(this->common_objects.data()));
         as.write_push(r13);
+        as.write_push(r14);
+
+        // set up storage offset. I'm lazy so we always use a 3-dimensional
+        // vector, even in 1 and 2 dimensions
+        // TODO: don't be lazy
+        as.write_push(0);
+        as.write_push(0);
+        as.write_push(0);
+        as.write_mov(r14, rsp);
+
         as.write_lea(r13, MemoryReference(rsp, -8));
 
-        this->write_jump_to_cell(pos, as, Position(0, 0, 0, 1, 0, 0, true));
+        this->write_jump_to_cell(pos, as, Position(0, 0, 0, 1, 0, 0,
+            true));
 
       } else {
         opcode = this->field.get(pos.x, pos.y, pos.z);
@@ -1293,6 +1697,12 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
 
     if (recompile_dependencies) {
       for (const auto& dependency_pos : cell.address_dependencies) {
+        if (this->debug_flags & DebugFlag::ShowCompilationEvents) {
+          string pos_str = pos.str();
+          string dependency_str = dependency_pos.str();
+          fprintf(stderr, "%s depends on %s\n", dependency_str.c_str(),
+              pos_str.c_str());
+        }
         pending_positions.emplace(dependency_pos);
       }
       cell.address_dependencies.clear();
@@ -1305,16 +1715,21 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
       throw logic_error("cell code address not null after cell was reset");
     }
 
-    if (this->debug_flags & DebugFlag::ShowAssembledCells) {
+    if (this->debug_flags & DebugFlag::ShowCompilationEvents) {
       string pos_str = pos.str();
       if (reset_cell) {
         fprintf(stderr, "reset cell %s (opcode = %02hX \'%c\')\n",
             pos_str.c_str(), opcode, opcode);
       } else {
-        string dasm = AMD64Assembler::disassemble(cell.code, cell.code_size,
-            reinterpret_cast<uint64_t>(cell.code), &label_offsets);
-        fprintf(stderr, "compiled cell %s (opcode = %02hX \'%c\'):\n%s\n\n",
-            pos_str.c_str(), opcode, opcode, dasm.c_str());
+        if (this->debug_flags & DebugFlag::ShowAssembledCells) {
+          string dasm = AMD64Assembler::disassemble(cell.code, cell.code_size,
+              reinterpret_cast<uint64_t>(cell.code), &label_offsets);
+          fprintf(stderr, "compiled cell %s (opcode = %02hX \'%c\'):\n%s\n\n",
+              pos_str.c_str(), opcode, opcode, dasm.c_str());
+        } else {
+          fprintf(stderr, "compiled cell %s (opcode = %02hX \'%c\')\n",
+              pos_str.c_str(), opcode, opcode);
+        }
       }
     }
 
@@ -1335,7 +1750,7 @@ void BefungeJITCompiler::write_function_call(AMD64Assembler& as,
   }
 }
 
-void BefungeJITCompiler::write_jump_to_cell(const Position& current_pos,
+void BefungeJITCompiler::write_jump_to_cell(const Position& cell_pos,
     AMD64Assembler& as, const Position& next_pos) {
   Position& next_pos_norm = next_pos.copy().wrap_to_field(this->field);
   auto& next_cell = this->compiled_cells[next_pos_norm];
@@ -1362,7 +1777,7 @@ void BefungeJITCompiler::write_jump_to_cell(const Position& current_pos,
     as.write_jmp(this->common_object_reference("dispatch_compile_cell"));
   }
 
-  next_cell.address_dependencies.emplace(current_pos);
+  next_cell.address_dependencies.emplace(cell_pos);
 }
 
 void BefungeJITCompiler::write_jump_table(AMD64Assembler& as,
@@ -1411,7 +1826,7 @@ MemoryReference BefungeJITCompiler::common_object_reference(const string& name) 
 const void* BefungeJITCompiler::dispatch_compile_cell(BefungeJITCompiler* c,
     const Position* pos) {
   const void* ret = c->compile_cell(*pos);
-  if (c->debug_flags & DebugFlag::ShowAssembledCells) {
+  if (c->debug_flags & DebugFlag::ShowCompilationEvents) {
     fprintf(stderr, "returning control to compiled code at %016" PRIX64 "\n",
         reinterpret_cast<uint64_t>(ret));
   }
@@ -1421,7 +1836,6 @@ const void* BefungeJITCompiler::dispatch_compile_cell(BefungeJITCompiler* c,
 const void* BefungeJITCompiler::dispatch_get_cell_code(BefungeJITCompiler* c,
     const Position* pos) {
   Position normalized_pos = pos->copy().wrap_to_field(c->field);
-
   try {
     const void* code = c->compiled_cells.at(normalized_pos).code;
     if (code) {
@@ -1460,16 +1874,20 @@ const void* BefungeJITCompiler::dispatch_field_write(BefungeJITCompiler* c,
   const auto& return_position = c->token_to_position.at(return_position_token);
   auto& return_cell = c->compiled_cells[return_position];
   const void* ret = return_cell.code ? return_cell.code : c->compile_cell(return_position);
-  if (c->debug_flags & DebugFlag::ShowAssembledCells) {
+  if (c->debug_flags & DebugFlag::ShowCompilationEvents) {
     fprintf(stderr, "returning control to compiled code at %016" PRIX64 "\n",
         reinterpret_cast<uint64_t>(ret));
   }
   return ret;
 }
 
-void BefungeJITCompiler::dispatch_print_stack_contents(const int64_t* stack_top,
-    size_t count) {
-  fprintf(stderr, "[stack debug: %zu items; item 0 at top]\n", count);
+void BefungeJITCompiler::dispatch_print_state(const int64_t* stack_top,
+    size_t count, const Position* pos, int64_t* storage_offset) {
+  string pos_str = pos->str();
+  fprintf(stderr, "[stack debug] at position %s with storage offset (%" PRId64
+      ", %" PRId64 ", %" PRId64 "); stack has %zu items; item 0 at top\n",
+      pos_str.c_str(), storage_offset[0], storage_offset[1], storage_offset[2],
+      count);
   for (size_t x = 0; x < count; x++) {
     int64_t item = stack_top[x];
     if (item >= 0x20 && item <= 0x7F) {

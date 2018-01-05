@@ -23,7 +23,8 @@ class BefungeJITCompiler {
 public:
   enum DebugFlag {
     EnableStackPrintOpcode = 1,
-    ShowAssembledCells = 2,
+    ShowCompilationEvents = 2,
+    ShowAssembledCells = 4,
   };
 
   explicit BefungeJITCompiler(const std::string& filename,
@@ -77,8 +78,8 @@ private:
       int64_t return_position_token, int64_t x, int64_t y, int64_t z,
       int64_t value);
 
-  static void dispatch_print_stack_contents(const int64_t* stack_top,
-      size_t count);
+  static void dispatch_print_state(const int64_t* stack_top, size_t count,
+      const Position* pos, int64_t* storage_offset);
 
   static void dispatch_throw_error(const char* error_string);
 

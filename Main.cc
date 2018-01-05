@@ -95,6 +95,8 @@ int main(int argc, char* argv[]) {
     // befunge options
     } else if (!strncmp(argv[x], "--dimensions=", 13)) {
       dimensions = atoi(&argv[x][13]);
+    } else if (!strcmp(argv[x], "--enable-debug-opcode")) {
+      enable_debug_opcode = true;
 
     // positional arguments
     } else if (!input_filename) {
@@ -198,7 +200,7 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
       } else if (behavior == Behavior::Compile) {
         throw logic_error("befunge compiler not implemented");
       } else if (behavior == Behavior::Execute) {
-        uint64_t debug_flags = (assembly ? 2 : 0) | (enable_debug_opcode ? 1 : 0);
+        uint64_t debug_flags = (assembly ? 6 : 0) | (enable_debug_opcode ? 1 : 0);
         BefungeJITCompiler(input_filename, dimensions, debug_flags).execute();
       }
     } else if (language == Language::Malbolge) {
