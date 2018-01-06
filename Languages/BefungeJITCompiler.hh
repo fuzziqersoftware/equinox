@@ -66,8 +66,15 @@ private:
   void write_jump_table(AMD64Assembler& as, const std::string& label_name,
       const Position& pos, const std::vector<Position>& positions);
 
+  // the vector is [(reg, should_add_to_existing_value), ...]
+  void write_load_storage_offset(AMD64Assembler& as,
+      const std::vector<std::pair<MemoryReference, bool>>& target_regs);
+
   void add_common_object(const std::string& name, const void* o);
   MemoryReference common_object_reference(const std::string& name);
+
+  MemoryReference storage_offset_reference(uint8_t dimension);
+  MemoryReference end_of_last_stack_reference();
 
   static const void* dispatch_compile_cell(BefungeJITCompiler* c, const Position* pos);
   static const void* dispatch_get_cell_code(BefungeJITCompiler* c, const Position* pos);
@@ -79,7 +86,7 @@ private:
       int64_t value);
 
   static void dispatch_print_state(const int64_t* stack_top, size_t count,
-      const Position* pos, int64_t* storage_offset);
+      const Position* pos, int64_t* storage_offset, int64_t dimensions);
 
   static void dispatch_throw_error(const char* error_string);
 
