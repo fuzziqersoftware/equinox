@@ -22,14 +22,18 @@
 class BefungeJITCompiler {
 public:
   enum DebugFlag {
-    EnableStackPrintOpcode = 1,
-    ShowCompilationEvents = 2,
-    ShowAssembledCells = 4,
+    EnableStackPrintOpcode = 0x01,
+    ShowCompilationEvents  = 0x02,
+    ShowAssembledCells     = 0x04,
+    InteractiveDebug       = 0x08,
+    SingleStep             = 0x10,
   };
 
   explicit BefungeJITCompiler(const std::string& filename,
       uint8_t dimensions = 2, uint64_t debug_flags = 0);
   ~BefungeJITCompiler() = default;
+
+  void set_breakpoint(const Position& pos);
 
   void execute();
 
@@ -61,14 +65,17 @@ private:
 
   static void write_function_call(AMD64Assembler& as,
       const MemoryReference& function_ref, bool stack_aligned);
-  void write_jump_to_cell(const Position& current_pos, AMD64Assembler& as,
+  void write_jump_to_cell(AMD64Assembler& as, const Position& current_pos,
       const Position& next_pos);
+  void write_jump_to_cell_unknown_alignment(AMD64Assembler& as,
+      const Position& current_pos, const Position& next_pos);
   void write_jump_table(AMD64Assembler& as, const std::string& label_name,
       const Position& pos, const std::vector<Position>& positions);
 
   // the vector is [(reg, should_add_to_existing_value), ...]
   void write_load_storage_offset(AMD64Assembler& as,
       const std::vector<std::pair<MemoryReference, bool>>& target_regs);
+  void write_throw_error(AMD64Assembler& as, const char* message);
 
   void add_common_object(const std::string& name, const void* o);
   MemoryReference common_object_reference(const std::string& name);
@@ -88,10 +95,18 @@ private:
   static void dispatch_print_state(const int64_t* stack_top, size_t count,
       const Position* pos, int64_t* storage_offset, int64_t dimensions);
 
+  void interactive_debug_hook(const Position& current_pos,
+      const Position& next_pos, int64_t stack_top, int64_t r13,
+      int64_t stack_end);
+  static void dispatch_interactive_debug_hook(BefungeJITCompiler* c,
+      const Position* current_pos, const Position* next_pos, int64_t stack_top,
+      int64_t r13, int64_t stack_end);
+
   static void dispatch_throw_error(const char* error_string);
 
   uint8_t dimensions;
   uint64_t debug_flags;
+  std::set<Position> breakpoint_positions;
 
   Field field;
   std::map<Position, CompiledCell> compiled_cells;

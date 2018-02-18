@@ -7,7 +7,10 @@ using namespace std;
 // the compiled code follows the system v calling convention, with the following
 // special registers:
 // r12 = common object ptr
-// r13 = stack end ptr - 8 (address of the last item on the stack)
+// r13 = stack end ptr - 8 (address of the last item on the stack). we do this
+//       so comparisons can be as useful as possible; if rsp < r13, there are
+//       two or more items on the stack, rsp == r13 means exactly one item,
+//       rsp > r13 means the stack is empty.
 
 
 
@@ -67,14 +70,16 @@ BefungeJITCompiler::BefungeJITCompiler(const string& filename,
   this->add_common_object("%" PRId64, "%" PRId64);
   this->add_common_object("%" PRId64 " ", "%" PRId64 " ");
   this->add_common_object("0 ", "0 ");
-  this->add_common_object("dispatch_compile_cell",
-      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_compile_cell));
-  this->add_common_object("dispatch_get_cell_code",
-      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_get_cell_code));
   this->add_common_object("jump_return_40", this->jump_return_40);
   this->add_common_object("jump_return_38", this->jump_return_38);
   this->add_common_object("jump_return_8", this->jump_return_8);
   this->add_common_object("jump_return_0", this->jump_return_0);
+  this->add_common_object("dispatch_compile_cell",
+      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_compile_cell));
+  this->add_common_object("dispatch_get_cell_code",
+      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_get_cell_code));
+  this->add_common_object("dispatch_interactive_debug_hook",
+      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_interactive_debug_hook));
   this->add_common_object("dispatch_field_read",
       reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_field_read));
   this->add_common_object("dispatch_field_write",
@@ -96,6 +101,10 @@ BefungeJITCompiler::BefungeJITCompiler(const string& filename,
   // to that code pushed the return address onto the stack implicitly)
   this->compiled_cells.emplace(piecewise_construct, forward_as_tuple(1, false),
       forward_as_tuple());
+}
+
+void BefungeJITCompiler::set_breakpoint(const Position& pos) {
+  this->breakpoint_positions.emplace(pos);
 }
 
 void BefungeJITCompiler::execute() {
@@ -203,7 +212,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       // jump to the correct cell based on the alignment change
       as.write_test(r10b, 1);
       as.write_jz("opcode_end_alignment_unchanged");
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
 
       // now the common case: the count is nonnegative. in this case, we'll copy
       // some items from the currentstack onto the new stack. really this just
@@ -219,9 +228,8 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       // TODO: implement this. it should push extra zeroes instead of failing
       as.write_cmp(rcx, r13);
       as.write_jle("count_not_excessive");
-      as.write_mov(rdi, reinterpret_cast<int64_t>(
-          "open-block opcode executed with count greater than stack size"));
-      as.write_call(this->common_object_reference("dispatch_throw_error"));
+      this->write_throw_error(as,
+          "open-block opcode executed with count greater than stack size");
       as.write_label("count_not_excessive");
 
       as.write_mov(rdx, rsp); // pointer to item being written
@@ -279,7 +287,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       // alignment doesn't change in this case because we popped one item (the
       // count) and pushed one "item" (the previous r13 value)
       as.write_label("opcode_end_alignment_unchanged");
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       {
         as.write_label("stack_empty");
@@ -293,7 +301,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         }
         as.write_push(r13);
         as.write_lea(r13, MemoryReference(rsp, -8));
-        this->write_jump_to_cell(pos, as, next_pos);
+        this->write_jump_to_cell(as, pos, next_pos);
       }
       break;
 
@@ -302,7 +310,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_lea(r8, this->end_of_last_stack_reference());
       as.write_cmp(r13, r8);
       as.write_jl("second_stack_exists");
-      this->write_jump_to_cell(pos, as, pos.copy().turn_around().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().turn_around().move_forward());
       as.write_label("second_stack_exists");
 
       // before this operation, the stacks are:
@@ -366,10 +374,8 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_lea(r9, MemoryReference(r13, 8));
       as.write_cmp(rcx, r9);
       as.write_jle("count_not_excessive");
-      as.write_mov(rdi, reinterpret_cast<int64_t>(
-          "close-block opcode executed with count greater than stack size"));
-      this->write_function_call(as, this->common_object_reference(
-          "dispatch_throw_error"), !pos.stack_aligned);
+      this->write_throw_error(as,
+          "close-block opcode executed with count greater than stack size");
       as.write_label("count_not_excessive");
 
       // the common case: the count is nonnegative. in this case, copy n items
@@ -395,46 +401,130 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_mov(rsp, rdx);
 
       as.write_label("opcode_end");
-      as.write_test(rsp, 8);
-      as.write_jz("stack_aligned");
-      this->write_jump_to_cell(pos, as,
-          pos.copy().move_forward().set_aligned(false));
-      as.write_label("stack_aligned");
-      this->write_jump_to_cell(pos, as,
-          pos.copy().move_forward().set_aligned(true));
+      this->write_jump_to_cell_unknown_alignment(as, pos, pos.copy().move_forward());
       break;
 
-//     case 'u':
-//       // if there's no second stack, reflect
-//       as.write_lea(r8, this->end_of_last_stack_reference());
-//       as.write_cmp(r13, r8);
-//       as.write_jl("second_stack_exists");
-//       this->write_jump_to_cell(pos, as, pos.copy().turn_around().move_forward());
-//       as.write_label("second_stack_exists");
+    case 'u':
+      // if there's no second stack, reflect
+      as.write_lea(r8, this->end_of_last_stack_reference());
+      as.write_cmp(r13, r8);
+      as.write_jl("second_stack_exists");
+      this->write_jump_to_cell(as, pos, pos.copy().turn_around().move_forward());
+      as.write_label("second_stack_exists");
 
-//       // if the top stack is empty, the count is zero, so do nothing
-//       as.write_cmp(rsp, r13);
-//       as.write_jle("stack_sufficient");
-//       this->write_jump_to_cell(pos, as, pos.copy().move_forward());
-//       as.write_label("stack_sufficient");
+      // if the top stack is empty, the count is zero, so do nothing
+      as.write_cmp(rsp, r13);
+      as.write_jle("stack_sufficient");
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
+      as.write_label("stack_sufficient");
 
-//       // the actin is different for positive vs. negative counts
-//       as.write_pop(r11); // item count
-//       as.write_cmp(r11, 0);
-//       as.write_jg("transfer_to_top_stack");
-//       as.write_jl("transfer_from_top_stack");
-//       this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      // the action is different for positive vs. negative counts. if the count
+      // is zero, do nothing
+      as.write_pop(r11); // item count
+      as.write_cmp(r11, 0);
+      as.write_jg("transfer_to_top_stack");
+      as.write_jl("transfer_from_top_stack");
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
 
-//       as.write_label("transfer_to_top_stack");
+      as.write_label("transfer_to_top_stack");
 
-// The u "Stack under Stack" instruction pops a count and transfers that many cells
-// from the SOSS to the TOSS. It transfers these cells in a pop-push loop. In other
-// words, the order is not preserved during transfer, it is reversed.
+      // before this opcode, the stack looked like:
+      //   rsp=count f1 f2 ... r13=fn oldr13 e1 e2 ... en g1 g2 ... gn
+      // but we already popped the count, so now it looks like:
+      //   rsp=f1 f2 ... r13=fn oldr13 e1 e2 ... en g1 g2 ... gn
 
-//       as.write_label("transfer_from_top_stack");
+      // now push e1 ... en in that order:
+      //   rsp=en ... e2 e1 f1 f2 ... r13=fn oldr13 e1 e2 ... en rdx=g1 g2 ... gn
+      // rcx = source ptr
+      // rdx = past-the-end ptr
+      // r8 = r13 of second stack
+      as.write_lea(rcx, MemoryReference(r13, 0x10));
+      as.write_lea(rdx, MemoryReference(r13, 0x10, r11, 8));
+      as.write_mov(r8, MemoryReference(r13, 8));
+      as.write_label("push_again");
+      as.write_cmp(rcx, rdx);
+      as.write_jge("push_done");
+      as.write_cmp(rcx, r8);
+      as.write_jg("second_stack_empty");
+      as.write_push(MemoryReference(rcx, 0));
+      as.write_jmp("push_next_cell");
+      as.write_label("second_stack_empty");
+      as.write_push(0);
+      as.write_label("push_next_cell");
+      as.write_add(rcx, 8);
+      as.write_jmp("push_again");
+      as.write_label("push_done");
 
-// If count is negative, |count| cells are transferred (similarly in a pop-push
-// loop) from the TOSS to the SOSS.
+      // move everything from rsp up to SOx (inclusive) up by (count) spaces,
+      // overwriting original e1 ... en, but don't underflow the second stack:
+      //   rsp=en ... e2 e1 f1 f2 ... r13=fn oldr13 rdx=g1 g2 ... gn
+      // rcx = dest item ptr
+      // rdx = past-the-end pointer
+      // r8 = destination delta
+      as.write_cmp(rdx, r8);
+      as.write_jle("end_pointer_ok");
+      as.write_lea(rdx, MemoryReference(r8, 8));
+      as.write_label("end_pointer_ok");
+      as.write_lea(r8, MemoryReference(rdx, -0x10));
+      as.write_sub(r8, r13);
+      as.write_lea(rcx, MemoryReference(rdx, -8));
+      as.write_sub(rcx, r8);
+      as.write_label("shift_forward_again");
+      as.write_mov(rax, MemoryReference(rcx, 0));
+      as.write_mov(MemoryReference(rcx, 0, r8), rax);
+      as.write_sub(rcx, 8);
+      as.write_cmp(rcx, rsp);
+      as.write_jge("shift_forward_again");
+
+      // shift the stack top and bottom pointers by the same amount
+      as.write_add(rsp, r8);
+      as.write_add(r13, r8);
+      as.write_jmp("opcode_end");
+
+      as.write_label("transfer_from_top_stack");
+
+      // before this opcode, the stack looked like:
+      //   rsp=-count e1 e2 ... en f1 f2 ... r13=fn oldr13 g1 g2 ... gn
+      // but we already popped the count, so now it looks like:
+      //   rsp=e1 e2 ... en f1 f2 ... r13=fn oldr13 g1 g2 ... gn
+
+      // move everything down to make room for the new items on the second stack
+      //   rsp=e1 e2 ... en f1 f2 ... r13=fn oldr13 ?1 ?2 ... ?n g1 g2 ... gn
+      // rsp = src item ptr
+      // rdx = new rsp (for after the loop is done)
+      // rcx = new r13 (for after the loop is done)
+      // r8 = past-tne-end pointer (to know when to terminate the loop)
+      // we will always shift at least one item (since oldr13 must be present)
+      // so we don't have to check before running the first loop iteration
+      as.write_lea(rdx, MemoryReference(rsp, 0, r11, 8));
+      as.write_lea(rcx, MemoryReference(r13, 0, r11, 8));
+      as.write_lea(r8, MemoryReference(r13, 0x10));
+      as.write_label("shift_backward_again");
+      as.write_pop(rax);
+      as.write_mov(MemoryReference(rsp, -8, r11, 8), rax);
+      as.write_cmp(rsp, r8);
+      as.write_jl("shift_backward_again");
+      as.write_mov(rsp, rdx);
+      as.write_mov(r13, rcx);
+
+      // now pop those dudes onto the second stack
+      //   rsp=f1 f2 ... r13=fn oldr13 en ... e2 e1 g1 g2 ... gn
+      as.write_lea(rdx, MemoryReference(r13, 0x10));
+      as.write_label("pop_again");
+      as.write_cmp(rsp, r13);
+      as.write_jg("top_stack_empty");
+      as.write_mov(MemoryReference(rdx, 0), 0);
+      as.write_jmp("pop_next_cell");
+      as.write_label("top_stack_empty");
+      as.write_pop(MemoryReference(rdx, 0));
+      as.write_label("pop_next_cell");
+      as.write_add(rdx, 8);
+      as.write_inc(r11);
+      as.write_js("pop_again");
+
+      as.write_label("opcode_end");
+      this->write_jump_to_cell_unknown_alignment(as, pos, pos.copy().move_forward());
+      break;
 
     case '0':
     case '1':
@@ -457,7 +547,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       } else {
         as.write_push(opcode - '0');
       }
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       break;
 
     case 'w':
@@ -468,7 +558,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_je("stack_one_item");
 
       // if the stack is empty, do nothing (0 == 0)
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       // if there's one item on the stack. turn right if it's positive, left if
       // it's negative
@@ -477,11 +567,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_cmp(rcx, 0);
       as.write_jl("stack_one_item_left");
       as.write_jg("stack_one_item_right");
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       as.write_label("stack_one_item_left");
-      this->write_jump_to_cell(pos, as, pos.copy().turn_left().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().turn_left().move_forward().change_alignment());
       as.write_label("stack_one_item_right");
-      this->write_jump_to_cell(pos, as, pos.copy().turn_right().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().turn_right().move_forward().change_alignment());
 
       // if there are two or more items on the stack, operate on them
       as.write_label("stack_sufficient");
@@ -490,11 +580,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_cmp(rax, rcx);
       as.write_jl("stack_sufficient_left");
       as.write_jg("stack_sufficient_right");
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
       as.write_label("stack_sufficient_left");
-      this->write_jump_to_cell(pos, as, pos.copy().turn_left().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().turn_left().move_forward());
       as.write_label("stack_sufficient_right");
-      this->write_jump_to_cell(pos, as, pos.copy().turn_right().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().turn_right().move_forward());
       break;
 
     case '`':
@@ -508,7 +598,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_je("stack_one_item");
 
       // if the stack is empty, leave it alone (the result is 0)
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       // if there's one item on the stack:
       //   +: leave it there (0 + x)
@@ -528,7 +618,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       } else if (opcode != '+') {
         as.write_mov(MemoryReference(rsp, 0), 0);
       }
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       // if there are two or more items on the stack, operate on them
       as.write_label("stack_sufficient");
@@ -558,14 +648,14 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         as.write_mov(MemoryReference(rsp, 0), 0);
         as.write_label("division_complete");
       }
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       break;
 
     case '!': // logical not
       as.write_cmp(rsp, r13);
       as.write_jle("stack_sufficient");
       as.write_push(1);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
 
       as.write_label("stack_sufficient");
       as.write_pop(rax);
@@ -573,44 +663,44 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_setz(al);
       as.write_movzx8(rax, al);
       as.write_push(rax);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
       break;
 
     case 'z': // "go through" (noop)
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
       break;
     case '<': // move left
-      this->write_jump_to_cell(pos, as, pos.copy().face(-1, 0, 0).move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().face(-1, 0, 0).move_forward());
       break;
     case '>': // move right
-      this->write_jump_to_cell(pos, as, pos.copy().face(1, 0, 0).move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().face(1, 0, 0).move_forward());
       break;
     case '^': // move up
       this->check_dimensions(2, pos, '^');
-      this->write_jump_to_cell(pos, as, pos.copy().face(0, -1, 0).move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().face(0, -1, 0).move_forward());
       break;
     case 'v': // move down
       this->check_dimensions(2, pos, 'v');
-      this->write_jump_to_cell(pos, as, pos.copy().face(0, 1, 0).move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().face(0, 1, 0).move_forward());
       break;
     case 'h': // move above
       this->check_dimensions(3, pos, 'h');
-      this->write_jump_to_cell(pos, as, pos.copy().face(0, 0, -1).move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().face(0, 0, -1).move_forward());
       break;
     case 'l': // move below
       this->check_dimensions(3, pos, 'l');
-      this->write_jump_to_cell(pos, as, pos.copy().face(0, 0, 1).move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().face(0, 0, 1).move_forward());
       break;
     case '[': // turn left
       this->check_dimensions(2, pos, '[');
-      this->write_jump_to_cell(pos, as, pos.copy().turn_left().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().turn_left().move_forward());
       break;
     case ']': // turn right
       this->check_dimensions(2, pos, ']');
-      this->write_jump_to_cell(pos, as, pos.copy().turn_right().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().turn_right().move_forward());
       break;
     case 'r': // reverse
-      this->write_jump_to_cell(pos, as, pos.copy().turn_around().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().turn_around().move_forward());
       break;
 
     case '?': // move randomly
@@ -662,11 +752,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_jle("stack_nonempty");
 
       if (opcode == '_') {
-        this->write_jump_to_cell(pos, as, pos.copy().face(1, 0, 0).move_forward());
+        this->write_jump_to_cell(as, pos, pos.copy().face(1, 0, 0).move_forward());
       } else if (opcode == '|') {
-        this->write_jump_to_cell(pos, as, pos.copy().face(0, 1, 0).move_forward());
+        this->write_jump_to_cell(as, pos, pos.copy().face(0, 1, 0).move_forward());
       } else { // 'm'
-        this->write_jump_to_cell(pos, as, pos.copy().face(0, 0, 1).move_forward());
+        this->write_jump_to_cell(as, pos, pos.copy().face(0, 0, 1).move_forward());
       }
 
       as.write_label("stack_nonempty");
@@ -703,7 +793,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       this->write_function_call(as,
           this->common_object_reference("dispatch_field_read"), pos.stack_aligned);
       as.write_push(rax);
-      this->write_jump_to_cell(pos, as, target_pos.move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, target_pos.move_forward().change_alignment());
       break;
     }
 
@@ -777,7 +867,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       }
 
       // char_pos now points to the terminal quote; we should go one beyond
-      this->write_jump_to_cell(pos, as, char_pos.move_forward());
+      this->write_jump_to_cell(as, pos, char_pos.move_forward());
       break;
     }
 
@@ -786,7 +876,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_cmp(rsp, r13);
       as.write_cmovle(rax, MemoryReference(rsp, 0));
       as.write_push(rax);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       break;
 
     case '\\': // swap top 2 items on stack
@@ -795,19 +885,19 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_je("stack_one_item");
 
       // if the stack is empty, do nothing (the top 2 values are zeroes)
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       // if there's one item on the stack, just push a zero after it
       as.write_label("stack_one_item");
       as.write_push(0);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
 
       // if there are two or more items on the stack, swap them
       as.write_label("stack_sufficient");
       as.write_pop(rax);
       as.write_xchg(rax, MemoryReference(rsp, 0));
       as.write_push(rax);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
       break;
 
     case '$': // discard top of stack
@@ -815,21 +905,15 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_jg("stack_empty");
 
       as.write_add(rsp, 8);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
 
       as.write_label("stack_empty");
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
       break;
 
     case 'n': // clear stack entirely
       as.write_lea(rsp, MemoryReference(r13, 8));
-      as.write_test(rsp, 8);
-      as.write_jz("stack_aligned");
-      this->write_jump_to_cell(pos, as,
-          pos.copy().move_forward().set_aligned(false));
-      as.write_label("stack_aligned");
-      this->write_jump_to_cell(pos, as,
-          pos.copy().move_forward().set_aligned(true));
+      this->write_jump_to_cell_unknown_alignment(as, pos, pos.copy().move_forward());
       break;
 
     case '.': { // pop and print as integer followed by space
@@ -841,7 +925,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_mov(rsi, this->common_object_reference("0 "));
       this->write_function_call(as, this->common_object_reference("fputs"),
           pos.stack_aligned);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       as.write_label("stack_sufficient");
       as.write_xor(rax, rax); // number of float args (printf is variadic)
@@ -849,7 +933,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_pop(rsi);
       this->write_function_call(as, this->common_object_reference("printf"),
           !pos.stack_aligned);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       break;
     }
 
@@ -860,21 +944,21 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_xor(rdi, rdi);
       this->write_function_call(as, this->common_object_reference("putchar"),
           pos.stack_aligned);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       as.write_label("stack_sufficient");
       as.write_pop(rdi);
       this->write_function_call(as, this->common_object_reference("putchar"),
           !pos.stack_aligned);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       break;
 
     case ' ': // skip this cell
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
       break;
 
     case '#': // skip this cell and next cell
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().move_forward());
       break;
 
     case 'j': { // jump forward by n cells
@@ -883,7 +967,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       // the compiler, sigh
       as.write_cmp(rsp, r13);
       as.write_jle("stack_sufficient");
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       as.write_label("stack_sufficient");
 
@@ -1063,10 +1147,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       // dx = dy = dz = 0, so execution would loop forever on this cell. we
       // raise an error instead.
       as.write_label("stack_empty");
-      as.write_mov(rdi, reinterpret_cast<int64_t>(
-          "cannot execute x opcode on empty stack"));
-      this->write_function_call(as, this->common_object_reference("dispatch_throw_error"),
-          false);
+      this->write_throw_error(as, "cannot execute x opcode on empty stack");
       break;
     }
 
@@ -1081,7 +1162,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       }
 
       // char_pos now points to the terminal semicolon; we should go one beyond
-      this->write_jump_to_cell(pos, as, char_pos.move_forward());
+      this->write_jump_to_cell(as, pos, char_pos.move_forward());
       break;
     }
 
@@ -1237,7 +1318,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       this->write_function_call(as,
           this->common_object_reference("dispatch_field_read"), pos.stack_aligned);
       as.write_push(rax);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
 
       as.write_label("stack_one_item");
       if (this->dimensions == 1) {
@@ -1253,7 +1334,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       this->write_function_call(as, 
           this->common_object_reference("dispatch_field_read"), !pos.stack_aligned);
       as.write_push(rax);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       if (this->dimensions == 2) {
         as.write_label("stack_two_or_more_items");
@@ -1263,7 +1344,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         this->write_function_call(as, 
             this->common_object_reference("dispatch_field_read"), pos.stack_aligned);
         as.write_push(rax);
-        this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+        this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
 
       } else if (dimensions == 3) {
         as.write_label("stack_two_or_more_items");
@@ -1278,7 +1359,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         this->write_function_call(as, 
             this->common_object_reference("dispatch_field_read"), pos.stack_aligned);
         as.write_push(rax);
-        this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+        this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
 
         as.write_label("stack_three_or_more_items");
         as.write_pop(rsi); // x
@@ -1286,7 +1367,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         this->write_function_call(as,
             this->common_object_reference("dispatch_field_read"), !pos.stack_aligned);
         as.write_push(rax);
-        this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+        this->write_jump_to_cell(as, pos, pos.copy().move_forward());
       }
       break;
 
@@ -1297,7 +1378,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_mov(rsi, rsp);
       this->write_function_call(as, this->common_object_reference("scanf"),
           !pos.stack_aligned);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       break;
     }
 
@@ -1305,7 +1386,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       this->write_function_call(as, this->common_object_reference("getchar"),
           pos.stack_aligned);
       as.write_push(rax);
-      this->write_jump_to_cell(pos, as, pos.copy().move_forward().change_alignment());
+      this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       break;
 
     case '@': // end program
@@ -1330,12 +1411,12 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         as.write_push(pos.y);
         as.write_push(pos.x);
         as.write_mov(rdx, rsp);
-        as.write_mov(rcx, this->storage_offset_reference(this->dimensions - 1));
+        as.write_lea(rcx, this->storage_offset_reference(this->dimensions - 1));
         as.write_mov(r8, this->dimensions);
         this->write_function_call(as,
             this->common_object_reference("dispatch_print_state"), !pos.stack_aligned);
         as.write_add(rsp, 7 * 8);
-        this->write_jump_to_cell(pos, as, pos.copy().move_forward());
+        this->write_jump_to_cell(as, pos, pos.copy().move_forward());
         break;
       }
 
@@ -1411,7 +1492,7 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
       // there aren't enough items on the stack to pop them all - just clear the
       // entire stack
       as.write_lea(rsp, MemoryReference(r13, 8));
-      this->write_jump_to_cell(iterator_pos, as,
+      this->write_jump_to_cell(as, iterator_pos,
           iterator_pos.copy().move_forward().set_aligned(true));
 
       // there are enough items on the stack to pop them all. if we pop an odd
@@ -1514,10 +1595,8 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
       // loop early
       as.write_label("stack_empty_in_loop");
       if (opcode == '`') {
-        as.write_mov(rdi, reinterpret_cast<int64_t>(
-            "unimplemented stack empty condition on iterated ` opcode"));
-        this->write_function_call(as, this->common_object_reference("dispatch_throw_error"),
-            false);
+        this->write_throw_error(as,
+            "unimplemented stack empty condition on iterated ` opcode");
       } else if (opcode == '-') {
         as.write_test(r11, 1);
         as.write_jnz("skip_neg");
@@ -1581,11 +1660,11 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
       } else if (opcode == 'l') {
         result_pos.face(0, 0, 1).move_forward();
       }
-      this->write_jump_to_cell(iterator_pos, as, result_pos);
+      this->write_jump_to_cell(as, iterator_pos, result_pos);
 
       as.write_label("other_alignment");
       result_pos.change_alignment();
-      this->write_jump_to_cell(iterator_pos, as, result_pos);
+      this->write_jump_to_cell(as, iterator_pos, result_pos);
       break;
     }
 
@@ -1670,17 +1749,17 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
   as.write_label("opcode_end");
   as.write_test(r10b, r10b, OperandSize::Byte);
   as.write_jnz("opcode_end_alignment_changed");
-  this->write_jump_to_cell(iterator_pos, as, iterator_pos.copy().move_forward());
+  this->write_jump_to_cell(as, iterator_pos, iterator_pos.copy().move_forward());
 
   as.write_label("opcode_end_alignment_changed");
-  this->write_jump_to_cell(iterator_pos, as,
+  this->write_jump_to_cell(as, iterator_pos,
       iterator_pos.copy().move_forward().change_alignment());
 
   as.write_label("opcode_end_zero_count_alignment_same");
-  this->write_jump_to_cell(iterator_pos, as, target_pos.copy().move_forward());
+  this->write_jump_to_cell(as, iterator_pos, target_pos.copy().move_forward());
 
   as.write_label("opcode_end_zero_count_alignment_changed");
-  this->write_jump_to_cell(iterator_pos, as,
+  this->write_jump_to_cell(as, iterator_pos,
       target_pos.copy().move_forward().change_alignment());
 }
 
@@ -1721,7 +1800,7 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
 
         as.write_lea(r13, MemoryReference(rsp, -8));
 
-        this->write_jump_to_cell(pos, as, Position(0, 0, 0, 1, 0, 0,
+        this->write_jump_to_cell(as, pos, Position(0, 0, 0, 1, 0, 0,
             !(this->dimensions & 1)));
 
       } else {
@@ -1826,12 +1905,46 @@ void BefungeJITCompiler::write_function_call(AMD64Assembler& as,
   }
 }
 
-void BefungeJITCompiler::write_jump_to_cell(const Position& cell_pos,
-    AMD64Assembler& as, const Position& next_pos) {
+void BefungeJITCompiler::write_jump_to_cell(AMD64Assembler& as,
+    const Position& cell_pos, const Position& next_pos) {
   Position& next_pos_norm = next_pos.copy().wrap_to_field(this->field);
   auto& next_cell = this->compiled_cells[next_pos_norm];
+
+  if (this->debug_flags & DebugFlag::InteractiveDebug) {
+    as.write_mov(rdi, this->common_object_reference("this"));
+    as.write_mov(rcx, rsp);
+    as.write_push(cell_pos.stack_aligned);
+    as.write_push(cell_pos.dz);
+    as.write_push(cell_pos.dy);
+    as.write_push(cell_pos.dx);
+    as.write_push(cell_pos.z);
+    as.write_push(cell_pos.y);
+    as.write_push(cell_pos.x);
+    as.write_mov(rsi, rsp);
+    as.write_push(next_pos_norm.stack_aligned);
+    as.write_push(next_pos_norm.dz);
+    as.write_push(next_pos_norm.dy);
+    as.write_push(next_pos_norm.dx);
+    as.write_push(next_pos_norm.z);
+    as.write_push(next_pos_norm.y);
+    as.write_push(next_pos_norm.x);
+    as.write_mov(rdx, rsp);
+    as.write_mov(r8, r13);
+    as.write_lea(r9, this->end_of_last_stack_reference());
+
+    if (!next_pos.stack_aligned) {
+      as.write_sub(rsp, 8);
+    }
+    as.write_call(this->common_object_reference("dispatch_interactive_debug_hook"));
+    if (!next_pos.stack_aligned) {
+      as.write_add(rsp, 15 * 8);
+    } else {
+      as.write_add(rsp, 14 * 8);
+    }
+  }
+
   if (next_cell.code) {
-    as.write_jmp(next_cell.code);
+    as.write_jmp_abs(next_cell.code);
   } else {
     // dispatch_compile_cell returns the newly-compiled cell's entry point, so
     // we can just jump to that
@@ -1856,6 +1969,15 @@ void BefungeJITCompiler::write_jump_to_cell(const Position& cell_pos,
   next_cell.address_dependencies.emplace(cell_pos);
 }
 
+void BefungeJITCompiler::write_jump_to_cell_unknown_alignment(
+    AMD64Assembler& as, const Position& cell_pos, const Position& next_pos) {
+  as.write_test(rsp, 8);
+  as.write_jz("stack_aligned");
+  this->write_jump_to_cell(as, cell_pos, next_pos.copy().set_aligned(false));
+  as.write_label("stack_aligned");
+  this->write_jump_to_cell(as, cell_pos, next_pos.copy().set_aligned(true));
+}
+
 void BefungeJITCompiler::write_jump_table(AMD64Assembler& as,
     const string& label_name, const Position& pos,
     const vector<Position>& positions) {
@@ -1873,7 +1995,7 @@ void BefungeJITCompiler::write_jump_table(AMD64Assembler& as,
       next_cell.address_dependencies.emplace(pos);
     } else {
       as.write_label(label_name + "_" + next_pos.label());
-      this->write_jump_to_cell(pos, as, next_pos);
+      this->write_jump_to_cell(as, pos, next_pos);
       jump_table_contents.emplace_back(0);
     }
   }
@@ -1904,6 +2026,13 @@ void BefungeJITCompiler::write_load_storage_offset(AMD64Assembler& as,
   }
 }
 
+void BefungeJITCompiler::write_throw_error(AMD64Assembler& as,
+    const char* message) {
+  as.write_mov(rdi, reinterpret_cast<int64_t>(message));
+  as.write_and(rsp, -0x10);
+  as.write_call(this->common_object_reference("dispatch_throw_error"));
+}
+
 void BefungeJITCompiler::add_common_object(const string& name, const void* o) {
   auto emplace_ret = this->common_object_index.emplace(name, this->common_objects.size());
   if (emplace_ret.second) {
@@ -1923,16 +2052,18 @@ MemoryReference BefungeJITCompiler::storage_offset_reference(uint8_t dimension) 
 }
 
 MemoryReference BefungeJITCompiler::end_of_last_stack_reference() {
-  return MemoryReference(rbp, -7 * 8);
+  return MemoryReference(rbp, -8 * (3 + this->dimensions));
 }
 
 const void* BefungeJITCompiler::dispatch_compile_cell(BefungeJITCompiler* c,
     const Position* pos) {
   const void* ret = c->compile_cell(*pos);
   if (c->debug_flags & DebugFlag::ShowCompilationEvents) {
-    fprintf(stderr, "returning control to compiled code at %016" PRIX64 "\n",
-        reinterpret_cast<uint64_t>(ret));
+    string pos_str = pos->str();
+    fprintf(stderr, "returning control to compiled code at %016" PRIX64 " %s\n",
+        reinterpret_cast<uint64_t>(ret), pos_str.c_str());
   }
+
   return ret;
 }
 
@@ -2011,6 +2142,44 @@ void BefungeJITCompiler::dispatch_print_state(const int64_t* stack_top,
       fprintf(stderr, "item %zu: %" PRId64 " (0x%" PRIX64 ")\n", x, item, item);
     }
   }
+}
+
+void BefungeJITCompiler::interactive_debug_hook(const Position& current_pos,
+    const Position& next_pos, int64_t stack_top, int64_t r13,
+    int64_t stack_end) {
+  if (!(this->debug_flags & DebugFlag::SingleStep)) {
+    for (const auto& pos : this->breakpoint_positions) {
+      if (pos.x == next_pos.x && pos.y == next_pos.y && pos.z == next_pos.z) {
+        this->debug_flags |= DebugFlag::SingleStep;
+        break;
+      }
+    }
+  }
+
+  if (this->debug_flags & DebugFlag::SingleStep) {
+    string next_pos_str = next_pos.str();
+    string current_pos_str = current_pos.str();
+    fprintf(stderr, "single step: at = \'%c\' %s, to = '%c' %s\n",
+        this->field.get(current_pos.x, current_pos.y, current_pos.z),
+        current_pos_str.c_str(),
+        this->field.get(next_pos.x, next_pos.y, next_pos.z),
+        next_pos_str.c_str());
+
+    for (size_t stack_index = 0; stack_top < stack_end; stack_index++, stack_top += 8) {
+      for (size_t item_index = 0; stack_top <= r13; item_index++, stack_top += 8) {
+        int64_t item = *reinterpret_cast<int64_t*>(stack_top);
+        fprintf(stderr, "[stack %zu : %zu] %" PRId64 " (0x%" PRIX64 ")\n",
+            stack_index, item_index, item, item);
+      }
+      r13 = *reinterpret_cast<int64_t*>(stack_top);
+    }
+  }
+}
+
+void BefungeJITCompiler::dispatch_interactive_debug_hook(BefungeJITCompiler* c,
+    const Position* current_pos, const Position* next_pos, int64_t stack_top,
+    int64_t r13, int64_t stack_end) {
+  c->interactive_debug_hook(*current_pos, *next_pos, stack_top, r13, stack_end);
 }
 
 void BefungeJITCompiler::dispatch_throw_error(const char* message) {

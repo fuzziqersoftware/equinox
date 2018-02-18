@@ -49,6 +49,8 @@ int main(int argc, char* argv[]) {
   bool assembly = false;
   bool intel_syntax = false;
   bool enable_debug_opcode = false;
+  bool single_step = false;
+  set<Position> befunge_breakpoints;
   Behavior behavior = Behavior::Execute;
 
   int x;
@@ -93,6 +95,19 @@ int main(int argc, char* argv[]) {
       optimize_level = atoi(&argv[x][17]);
 
     // befunge options
+    } else if (!strncmp(argv[x], "--dimensions=", 13)) {
+      dimensions = atoi(&argv[x][13]);
+    } else if (!strcmp(argv[x], "--single-step")) {
+      single_step = true;
+    } else if (!strncmp(argv[x], "--breakpoint=", 13)) {
+      vector<string> parts = split(&argv[x][13], ',');
+      if (parts.empty() || parts.size() > 3) {
+        num_bad_options++;
+      }
+      int64_t x = strtoull(parts[0].c_str(), NULL, 0);
+      int64_t y = (parts.size() > 1) ? strtoull(parts[1].c_str(), NULL, 0) : 0;
+      int64_t z = (parts.size() > 2) ? strtoull(parts[2].c_str(), NULL, 0) : 0;
+      befunge_breakpoints.emplace(x, y, z, 0, 0, 0);
     } else if (!strncmp(argv[x], "--dimensions=", 13)) {
       dimensions = atoi(&argv[x][13]);
     } else if (!strcmp(argv[x], "--enable-debug-opcode")) {
@@ -159,6 +174,11 @@ Brainfuck runs in all modes. Language-specific options:\n\
       Level 2: Eliminate memory boundary checks.\n\
 \n\
 Befunge runs only in execute or interpret mode. Language-specific options:\n\
+  --single-step\n\
+      Enable single-step debugging immediately.\n\
+  --breakpoint=x[,y[,z]]\n\
+      Enter interactive debugging when execution hits this location.\n\
+      This option may be given multiple times.\n\
   --dimensions=num\n\
       Chooses the sublanguage to use. 1 for Unefunge, 2 for Befunge (default),\n\
       3 for Trefunge.\n\
@@ -200,8 +220,17 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
       } else if (behavior == Behavior::Compile) {
         throw logic_error("befunge compiler not implemented");
       } else if (behavior == Behavior::Execute) {
-        uint64_t debug_flags = (assembly ? 6 : 0) | (enable_debug_opcode ? 1 : 0);
-        BefungeJITCompiler(input_filename, dimensions, debug_flags).execute();
+        using DF = BefungeJITCompiler::DebugFlag;
+        uint64_t debug_flags =
+            (assembly ? (DF::ShowCompilationEvents | DF::ShowAssembledCells) : 0) |
+            (enable_debug_opcode ? DF::EnableStackPrintOpcode : 0) |
+            (single_step ? (DF::InteractiveDebug | DF::SingleStep) : 0) |
+            (befunge_breakpoints.empty() ? 0 : DF::InteractiveDebug);
+        BefungeJITCompiler c(input_filename, dimensions, debug_flags);
+        for (const auto& pos : befunge_breakpoints) {
+          c.set_breakpoint(pos);
+        }
+        c.execute();
       }
     } else if (language == Language::Malbolge) {
       if (behavior == Behavior::Interpret) {
