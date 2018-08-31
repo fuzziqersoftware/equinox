@@ -177,7 +177,6 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
 
     switch (prev_opcode) {
       case '+':
-        as.write_label(string_printf("%zu_Increment", offset));
         if (num_same_opcode == 1) {
           as.write_inc(MemoryReference(Register::RBX, 0), OperandSize::Byte);
         } else {
@@ -186,7 +185,6 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case '-':
-        as.write_label(string_printf("%zu_Decrement", offset));
         if (num_same_opcode == 1) {
           as.write_dec(MemoryReference(Register::RBX, 0), OperandSize::Byte);
         } else {
@@ -195,8 +193,6 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case '>':
-        as.write_label(string_printf("%zu_MoveRight", offset));
-
         if (num_same_opcode == 1) {
           as.write_inc(rbx);
         } else {
@@ -211,8 +207,6 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case '<':
-        as.write_label(string_printf("%zu_MoveLeft", offset));
-
         as.write_cmp(rbx, r12);
         as.write_jle(string_printf("%zu_MoveLeft_skip", offset));
         if (num_same_opcode == 1) {
@@ -224,7 +218,6 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case '[':
-        as.write_label(string_printf("%zu_OpenBrace", offset));
         for (; num_same_opcode > 0; num_same_opcode--) {
           jump_offsets.emplace_back(offset - num_same_opcode);
           as.write_cmp(MemoryReference(Register::RBX, 0), 0, OperandSize::Byte);
@@ -234,7 +227,6 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case ']':
-        as.write_label(string_printf("%zu_CloseBrace", offset));
         for (; num_same_opcode > 0; num_same_opcode--) {
           if (jump_offsets.empty()) {
             throw runtime_error("unbalanced braces");
@@ -247,7 +239,6 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case '.':
-        as.write_label(string_printf("%zu_Output", offset));
         as.write_sub(rsp, 8);
         for (; num_same_opcode > 0; num_same_opcode--) {
           as.write_movzx8(Register::RDI, MemoryReference(Register::RBX, 0));
@@ -257,7 +248,6 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case ',':
-        as.write_label(string_printf("%zu_Input", offset));
         as.write_sub(rsp, 8);
         for (; num_same_opcode > 0; num_same_opcode--) {
           as.write_call(r15);
