@@ -37,7 +37,7 @@ BefungeJITCompiler::BefungeJITCompiler(const string& filename,
 
     unordered_set<size_t> patch_offsets;
     multimap<size_t, string> label_offsets;
-    string data = as.assemble(patch_offsets, &label_offsets);
+    string data = as.assemble(&patch_offsets, &label_offsets);
     const void* executable = this->buf.append(data);
 
     // extract the function addresses from the assembled code
@@ -1818,7 +1818,7 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
 
       // at this point the code for the cell is complete; we can assemble it and
       // put it in the buffer appropriately
-      data = as.assemble(patch_offsets, &label_offsets);
+      data = as.assemble(&patch_offsets, &label_offsets);
     }
 
     bool recompile_dependencies;

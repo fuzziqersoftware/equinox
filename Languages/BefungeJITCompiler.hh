@@ -12,8 +12,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "../Assembler/AMD64Assembler.hh"
-#include "../Assembler/CodeBuffer.hh"
+#include <libamd64/AMD64Assembler.hh>
+#include <libamd64/CodeBuffer.hh>
 
 #include "Befunge.hh"
 

@@ -13,8 +13,8 @@
 #include <phosg/Time.hh>
 #include <string>
 
-#include "../Assembler/AMD64Assembler.hh"
-#include "../Assembler/CodeBuffer.hh"
+#include <libamd64/AMD64Assembler.hh>
+#include <libamd64/CodeBuffer.hh>
 
 using namespace std;
 
@@ -317,7 +317,7 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
 
   multimap<size_t, string> compiled_labels;
   unordered_set<size_t> patch_offsets;
-  string data = as.assemble(patch_offsets, &compiled_labels);
+  string data = as.assemble(&patch_offsets, &compiled_labels);
   void* executable_data = buf.append(data, &patch_offsets);
   void (*function)() = reinterpret_cast<void(*)()>(executable_data);
 
