@@ -15,7 +15,8 @@
 
 #include "Languages/BefungeInterpreter.hh"
 #include "Languages/BefungeJITCompiler.hh"
-#include "Languages/Brainfuck.hh"
+#include "Languages/BrainfuckInterpreter.hh"
+#include "Languages/BrainfuckJITCompiler.hh"
 #include "Languages/MalbolgeInterpreter.hh"
 
 using namespace std;
@@ -24,8 +25,7 @@ using namespace std;
 
 enum class Behavior {
   Interpret = 0,
-  Compile = 1,
-  Execute = 2,
+  Execute = 1,
 };
 
 enum class Language {
@@ -40,42 +40,33 @@ enum class Language {
 int main(int argc, char* argv[]) {
 
   Language language = Language::Automatic;
-  int optimize_level = 1;
+  int optimize_level = 2;
   uint8_t dimensions = 2;
   size_t memory_size = 0x100000; // 1MB
   size_t expansion_size = 0x10000; // 64KB
   size_t num_bad_options = 0;
   bool verbose = false;
   bool assembly = false;
-  bool intel_syntax = false;
   bool enable_debug_opcode = false;
   bool single_step = false;
   set<Position> befunge_breakpoints;
   Behavior behavior = Behavior::Execute;
+  const char* input_filename = NULL;
 
   int x;
-  const char* input_filename = NULL;
-  const char* output_filename = NULL;
   for (x = 1; x < argc; x++) {
 
     // all-language options
     if (!strcmp(argv[x], "--verbose")) {
       verbose = true;
-    } else if (!strcmp(argv[x], "--assembly")) {
+    } else if (!strcmp(argv[x], "--show-assembly")) {
       assembly = true;
-    } else if (!strcmp(argv[x], "--intel-syntax")) {
-      intel_syntax = true;
 
     // mode selection
     } else if (!strcmp(argv[x], "--interpret")) {
       behavior = Behavior::Interpret;
     } else if (!strcmp(argv[x], "--execute")) {
       behavior = Behavior::Execute;
-    } else if (!strcmp(argv[x], "--compile")) {
-      behavior = Behavior::Compile;
-    } else if (!strncmp(argv[x], "--output-filename=", 18)) {
-      behavior = Behavior::Compile;
-      output_filename = &argv[x][18];
 
     // language selection
     } else if (!strcmp(argv[x], "--automatic")) {
@@ -129,9 +120,7 @@ int main(int argc, char* argv[]) {
 
   if (num_bad_options) {
     fprintf(stderr, "\n\
-To interpret code: %s [options] input_file\n\
-To compile code: %s [options] input_file --output-filename=output_file\n\
-To execute code: %s -x [options] input_file\n\
+Usage: %s [options] program_file\n\
 \n\
 Languages:\n\
   --automatic\n\
@@ -147,33 +136,27 @@ Modes:\n\
   --interpret\n\
       Run the code under an interpreter.\n\
   --execute\n\
-      Compile the code and run it immediately (default).\n\
-  --compile\n\
-      Compile the code to an executable. Implied if --output-filename is used.\n\
+      Compile the code to AMD64 assembly and run it (default).\n\
 \n\
 Options for all languages:\n\
-  --assembly\n\
+  --show-assembly\n\
       In compile mode, output amd64 assembly code instead of an executable.\n\
       In execute mode, output the compiled code\'s disassembly before running.\n\
       No effect in interpret mode (no assembly is produced).\n\
-  --intel-syntax\n\
-      In compile mode, output code using Intel syntax instead of AT&T syntax.\n\
-      No effect in execute mode (debugging output is always Intel syntax).\n\
-      No effect in interpret mode (no assembly is produced).\n\
 \n\
-Brainfuck runs in all modes. Language-specific options:\n\
+Brainfuck-specific options:\n\
   --memory-size=num_bytes\n\
       In compile mode, sets the overall memory size for the compiled program\n\
       (default 1048576). In interpret and execute mode, sets the size by which\n\
       the memory space is expanded when the program accesses beyond the end\n\
       (default 65536).\n\
   --optimize-level=level\n\
-      Sets the optimization level. Probably you want 1 (default).\n\
+      Sets the optimization level. Probably you want 2 (default).\n\
       Level 0: Translate every opcode directly into a sequence of instructions.\n\
       Level 1: Collapse repeated opcodes into more efficient instructions.\n\
-      Level 2: Eliminate memory boundary checks.\n\
+      Level 2: Collapse common sequences into more efficient instructions.\n\
 \n\
-Befunge runs only in execute or interpret mode. Language-specific options:\n\
+Funge-98-specific options:\n\
   --single-step\n\
       Enable single-step debugging immediately.\n\
   --breakpoint=x[,y[,z]]\n\
@@ -184,7 +167,7 @@ Befunge runs only in execute or interpret mode. Language-specific options:\n\
       3 for Trefunge.\n\
 \n\
 Malbolge runs only in interpret mode. There are no language-specific options.\n\
-", argv[0], argv[0], argv[0]);
+", argv[0]);
     return 1;
   }
 
@@ -207,9 +190,6 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
     if (language == Language::Brainfuck) {
       if (behavior == Behavior::Interpret) {
         bf_interpret(input_filename, expansion_size);
-      } else if (behavior == Behavior::Compile) {
-        bf_compile(input_filename, output_filename, memory_size, optimize_level,
-            assembly, intel_syntax);
       } else if (behavior == Behavior::Execute) {
         bf_execute(input_filename, memory_size, optimize_level, expansion_size,
             assembly);
@@ -217,8 +197,6 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
     } else if (language == Language::Befunge) {
       if (behavior == Behavior::Interpret) {
         befunge_interpret(input_filename, dimensions, enable_debug_opcode);
-      } else if (behavior == Behavior::Compile) {
-        throw logic_error("befunge compiler not implemented");
       } else if (behavior == Behavior::Execute) {
         using DF = BefungeJITCompiler::DebugFlag;
         uint64_t debug_flags =
@@ -235,10 +213,8 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
     } else if (language == Language::Malbolge) {
       if (behavior == Behavior::Interpret) {
         malbolge_interpret(input_filename);
-      } else if (behavior == Behavior::Compile) {
-        throw logic_error("malbolge compiler not implemented");
       } else if (behavior == Behavior::Execute) {
-        throw logic_error("malbolge executor not implemented");
+        throw logic_error("malbolge compiler not implemented");
       }
     }
   } catch (const exception& e) {
