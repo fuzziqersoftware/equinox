@@ -50,7 +50,11 @@ void malbolge_interpret(const string& filename) {
 
     switch (normalized_opcode) {
       case 4:
-        c = program[d];
+        c = program[d] - 1;
+        if (c >= memory.size()) {
+          throw runtime_error("jump beyond end of memory");
+        }
+        opcode = memory[c]; // needed for reencryption later
         break;
       case 5:
         putc(a & 0xFF, stdout);
