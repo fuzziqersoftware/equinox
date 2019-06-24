@@ -42,7 +42,6 @@ int main(int argc, char* argv[]) {
   Language language = Language::Automatic;
   int optimize_level = 2;
   uint8_t dimensions = 2;
-  size_t memory_size = 0x100000; // 1MB
   size_t expansion_size = 0x10000; // 64KB
   size_t num_bad_options = 0;
   bool verbose = false;
@@ -79,8 +78,7 @@ int main(int argc, char* argv[]) {
       language = Language::Malbolge;
 
     // brainfuck options
-    } else if (!strncmp(argv[x], "--memory-size=", 14)) {
-      memory_size = atoi(&argv[x][14]);
+    } else if (!strncmp(argv[x], "--memory-expansion-size=", 24)) {
       expansion_size = atoi(&argv[x][14]);
     } else if (!strncmp(argv[x], "--optimize-level=", 17)) {
       optimize_level = atoi(&argv[x][17]);
@@ -140,31 +138,28 @@ Modes:\n\
 \n\
 Options for all languages:\n\
   --show-assembly\n\
-      In compile mode, output amd64 assembly code instead of an executable.\n\
       In execute mode, output the compiled code\'s disassembly before running.\n\
-      No effect in interpret mode (no assembly is produced).\n\
+      No effect in interpret mode.\n\
 \n\
 Brainfuck-specific options:\n\
-  --memory-size=num_bytes\n\
-      In compile mode, sets the overall memory size for the compiled program\n\
-      (default 1048576). In interpret and execute mode, sets the size by which\n\
-      the memory space is expanded when the program accesses beyond the end\n\
-      (default 65536).\n\
+  --memory-expansion-size=num_bytes\n\
+      Sets the size by which the memory space is expanded when the program\n\
+      accesses beyond the end (default 64KB).\n\
   --optimize-level=level\n\
       Sets the optimization level. Probably you want 2 (default).\n\
       Level 0: Translate every opcode directly into a sequence of instructions.\n\
       Level 1: Collapse repeated opcodes into more efficient instructions.\n\
-      Level 2: Collapse common sequences into more efficient instructions.\n\
+      Level 2: Collapse common loops into more efficient instructions.\n\
 \n\
 Funge-98-specific options:\n\
-  --single-step\n\
-      Enable single-step debugging immediately.\n\
-  --breakpoint=x[,y[,z]]\n\
-      Enter interactive debugging when execution hits this location.\n\
-      This option may be given multiple times.\n\
   --dimensions=num\n\
       Chooses the sublanguage to use. 1 for Unefunge, 2 for Befunge (default),\n\
       3 for Trefunge.\n\
+  --single-step\n\
+      Enable single-step debugging at program start time.\n\
+  --breakpoint=x[,y[,z]]\n\
+      Enter interactive debugging when execution hits this location.\n\
+      This option may be given multiple times.\n\
 \n\
 Malbolge runs only in interpret mode. There are no language-specific options.\n\
 ", argv[0]);
@@ -191,8 +186,8 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
       if (behavior == Behavior::Interpret) {
         bf_interpret(input_filename, expansion_size);
       } else if (behavior == Behavior::Execute) {
-        bf_execute(input_filename, memory_size, optimize_level, expansion_size,
-            assembly);
+        bf_execute(input_filename, expansion_size, optimize_level,
+            expansion_size, assembly);
       }
     } else if (language == Language::Befunge) {
       if (behavior == Behavior::Interpret) {
@@ -211,11 +206,10 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
         c.execute();
       }
     } else if (language == Language::Malbolge) {
-      if (behavior == Behavior::Interpret) {
-        malbolge_interpret(input_filename);
-      } else if (behavior == Behavior::Execute) {
-        throw logic_error("malbolge compiler not implemented");
+      if (behavior == Behavior::Execute) {
+        fprintf(stderr, "warning: malbolge compiler not implemented; falling back to interpreter\n");
       }
+      malbolge_interpret(input_filename);
     }
   } catch (const exception& e) {
     fprintf(stderr, "failed: %s\n", e.what());
