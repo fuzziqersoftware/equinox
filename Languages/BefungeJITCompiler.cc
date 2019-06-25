@@ -785,7 +785,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
     }
 
     case '\'': { // read program space immediately following this instruction
-      Position target_pos = pos.copy().move_forward().wrap_to_field(this->field);
+      Position target_pos = pos.copy().move_forward().wrap_lahey(this->field);
       as.write_mov(rdi, this->common_object_reference("this"));
       as.write_mov(rsi, target_pos.x);
       as.write_mov(rdx, target_pos.y);
@@ -799,7 +799,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
 
     case 's': { // write program space immediately following this instruction
       // both cases end up calling a function with these args
-      Position target_pos = pos.copy().move_forward().wrap_to_field(this->field);
+      Position target_pos = pos.copy().move_forward().wrap_lahey(this->field);
       as.write_mov(rdi, this->common_object_reference("this"));
 
       as.write_mov(rdx, target_pos.x);
@@ -957,9 +957,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       this->write_jump_to_cell(as, pos, pos.copy().move_forward());
       break;
 
-    case '#': // skip this cell and next cell
-      this->write_jump_to_cell(as, pos, pos.copy().move_forward().move_forward());
+    case '#': { // skip this cell and next cell
+      Position wrapped_next = pos.copy().move_forward().wrap_lahey(this->field);
+      this->write_jump_to_cell(as, pos, wrapped_next.move_forward());
       break;
+    }
 
     case 'j': { // jump forward by n cells
       // this is harder than it sounds because the distance is on the stack, not
@@ -1174,12 +1176,11 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         value = this->field.get(char_pos.x, char_pos.y, char_pos.z);
         if (value == ';') {
           in_semicolon = !in_semicolon;
-        } else if (!in_semicolon && (value != ' ')) {
+        } else if (!in_semicolon && (value != ' ') && (value != 'Y')) {
           break;
         }
-        char_pos.move_forward();
+        char_pos.move_forward().wrap_lahey(this->field);
       }
-      char_pos.wrap_to_field(this->field);
 
       this->compile_opcode_iterated(as, pos, char_pos, value);
       break;
@@ -1219,59 +1220,57 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         as.write_pop(r9); // value
         as.write_jmp("call_same_alignment");
 
-      } else {
-        if (this->dimensions == 2) {
-          as.write_pop(rcx); // y
-          as.write_pop(rdx); // x
+      } if (this->dimensions == 2) {
+        as.write_pop(rcx); // y
+        as.write_pop(rdx); // x
 
-          as.write_cmp(rsp, r13);
-          as.write_jle("stack_three_or_more_items");
+        as.write_cmp(rsp, r13);
+        as.write_jle("stack_three_or_more_items");
 
-          // stack has no more items after the popped two
-          as.write_label("stack_two_items");
-          this->write_load_storage_offset(as, {{rdx, true}, {rcx, true}, {r8, false}});
-          as.write_xor(r9, r9); // value
-          as.write_jmp("call_same_alignment");
+        // stack has no more items after the popped two
+        as.write_label("stack_two_items");
+        this->write_load_storage_offset(as, {{rdx, true}, {rcx, true}, {r8, false}});
+        as.write_xor(r9, r9); // value
+        as.write_jmp("call_same_alignment");
 
-          // stack has one item remaining after the popped two
-          as.write_label("stack_three_or_more_items");
-          this->write_load_storage_offset(as, {{rdx, true}, {rcx, true}, {r8, false}});
-          as.write_pop(r9); // value
-          as.write_jmp("call_other_alignment");
+        // stack has one item remaining after the popped two
+        as.write_label("stack_three_or_more_items");
+        this->write_load_storage_offset(as, {{rdx, true}, {rcx, true}, {r8, false}});
+        as.write_pop(r9); // value
+        as.write_jmp("call_other_alignment");
 
-        } else { // dimensions == 3
-          as.write_pop(r8); // z
-          as.write_pop(rcx); // y
+      } else { // dimensions == 3
+        as.write_pop(r8); // z
+        as.write_pop(rcx); // y
 
-          as.write_cmp(rsp, r13);
-          as.write_jl("stack_four_or_more_items");
-          as.write_je("stack_three_items");
+        as.write_cmp(rsp, r13);
+        as.write_jl("stack_four_or_more_items");
+        as.write_je("stack_three_items");
 
-          // stack has no more items after the popped two
-          as.write_label("stack_two_items");
-          this->write_load_storage_offset(as, {{rdx, false}, {rcx, true}, {r8, true}});
-          as.write_xor(r9, r9); // value
-          as.write_jmp("call_same_alignment");
+        // stack has no more items after the popped two
+        as.write_label("stack_two_items");
+        this->write_load_storage_offset(as, {{rdx, false}, {rcx, true}, {r8, true}});
+        as.write_xor(r9, r9); // value
+        as.write_jmp("call_same_alignment");
 
-          // stack has one item remaining after the popped two
-          as.write_label("stack_three_items");
-          as.write_pop(rdx); // x
-          this->write_load_storage_offset(as, {{rdx, true}, {rcx, true}, {r8, true}});
-          as.write_xor(r9, r9); // value
-          as.write_jmp("call_other_alignment");
+        // stack has one item remaining after the popped two
+        as.write_label("stack_three_items");
+        as.write_pop(rdx); // x
+        this->write_load_storage_offset(as, {{rdx, true}, {rcx, true}, {r8, true}});
+        as.write_xor(r9, r9); // value
+        as.write_jmp("call_other_alignment");
 
-          // stack has two or more items remaining after the popped two
-          as.write_label("stack_four_or_more_items");
-          as.write_pop(rdx); // x
-          this->write_load_storage_offset(as, {{rdx, true}, {rcx, true}, {r8, true}});
-          as.write_pop(r9); // value
-          as.write_jmp("call_same_alignment");
-        }
+        // stack has two or more items remaining after the popped two
+        as.write_label("stack_four_or_more_items");
+        as.write_pop(rdx); // x
+        this->write_load_storage_offset(as, {{rdx, true}, {rcx, true}, {r8, true}});
+        as.write_pop(r9); // value
+        as.write_jmp("call_same_alignment");
       }
 
       as.write_label("call_other_alignment");
       {
-        Position next_pos = pos.copy().move_forward().change_alignment().wrap_to_field(this->field);
+        Position next_pos = pos.copy().move_forward().change_alignment().wrap_lahey(this->field);
         int64_t token = this->next_token++;
         cell.next_position_tokens.emplace(token);
         this->token_to_position.emplace(token, next_pos);
@@ -1288,7 +1287,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
 
       as.write_label("call_same_alignment");
       {
-        Position next_pos = pos.copy().move_forward().wrap_to_field(this->field);
+        Position next_pos = pos.copy().move_forward().wrap_lahey(this->field);
         int64_t token = this->next_token++;
         cell.next_position_tokens.emplace(token);
         this->token_to_position.emplace(token, next_pos);
@@ -1755,6 +1754,9 @@ void BefungeJITCompiler::compile_opcode_iterated(AMD64Assembler& as,
   this->write_jump_to_cell(as, iterator_pos,
       iterator_pos.copy().move_forward().change_alignment());
 
+  // if the target did not execute (the count was zero), then we move forward
+  // from target_pos instead of iterator_pos because the target could not have
+  // changed the execution direction
   as.write_label("opcode_end_zero_count_alignment_same");
   this->write_jump_to_cell(as, iterator_pos, target_pos.copy().move_forward());
 
@@ -1907,7 +1909,7 @@ void BefungeJITCompiler::write_function_call(AMD64Assembler& as,
 
 void BefungeJITCompiler::write_jump_to_cell(AMD64Assembler& as,
     const Position& cell_pos, const Position& next_pos) {
-  Position& next_pos_norm = next_pos.copy().wrap_to_field(this->field);
+  Position& next_pos_norm = next_pos.copy().wrap_lahey(this->field);
   auto& next_cell = this->compiled_cells[next_pos_norm];
 
   if (this->debug_flags & DebugFlag::InteractiveDebug) {
@@ -1983,7 +1985,7 @@ void BefungeJITCompiler::write_jump_table(AMD64Assembler& as,
     const vector<Position>& positions) {
   vector<Position> normal_positions;
   for (const auto& next_pos : positions) {
-    normal_positions.emplace_back(next_pos.copy().wrap_to_field(this->field));
+    normal_positions.emplace_back(next_pos.copy().wrap_lahey(this->field));
   }
 
   vector<int64_t> jump_table_contents;
@@ -2069,7 +2071,7 @@ const void* BefungeJITCompiler::dispatch_compile_cell(BefungeJITCompiler* c,
 
 const void* BefungeJITCompiler::dispatch_get_cell_code(BefungeJITCompiler* c,
     const Position* pos) {
-  Position normalized_pos = pos->copy().wrap_to_field(c->field);
+  Position normalized_pos = pos->copy().wrap_lahey(c->field);
   try {
     const void* code = c->compiled_cells.at(normalized_pos).code;
     if (code) {

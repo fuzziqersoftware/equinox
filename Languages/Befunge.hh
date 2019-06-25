@@ -48,9 +48,13 @@ struct Position {
   Position& turn_right();
   Position& turn_around();
   Position& move_forward();
+  Position& move_backward();
   Position& change_alignment();
   Position& set_aligned(bool aligned);
-  Position& wrap_to_field(const Field& f);
+
+  bool is_within_field(const Field& f) const;
+  Position& wrap_modulus(const Field& f);
+  Position& wrap_lahey(const Field& f);
 
   std::string str() const;
   std::string label() const;

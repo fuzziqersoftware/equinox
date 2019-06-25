@@ -155,6 +155,8 @@ Funge-98-specific options:\n\
   --dimensions=num\n\
       Chooses the sublanguage to use. 1 for Unefunge, 2 for Befunge (default),\n\
       3 for Trefunge.\n\
+  --enable-debug-opcode\n\
+      Allow the use of the Y opcode to print the execution state.\n\
   --single-step\n\
       Enable single-step debugging at program start time.\n\
   --breakpoint=x[,y[,z]]\n\

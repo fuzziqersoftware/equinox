@@ -167,6 +167,13 @@ Position& Position::move_forward() {
   return *this;
 }
 
+Position& Position::move_backward() {
+  this->x -= this->dx;
+  this->y -= this->dy;
+  this->z -= this->dz;
+  return *this;
+}
+
 Position& Position::change_alignment() {
   this->stack_aligned = !this->stack_aligned;
   return *this;
@@ -177,9 +184,35 @@ Position& Position::set_aligned(bool aligned) {
   return *this;
 }
 
-Position& Position::wrap_to_field(const Field& f) {
+bool Position::is_within_field(const Field& f) const {
+  return (this->x >= 0) && (this->y >= 0) && (this->z >= 0) &&
+         (this->x < f.width()) && (this->y < f.height()) && (this->z < f.depth());
+}
+
+Position& Position::wrap_modulus(const Field& f) {
   this->x = f.wrap_x(this->x);
   this->y = f.wrap_y(this->y);
+  this->z = f.wrap_z(this->z);
+  return *this;
+}
+
+Position& Position::wrap_lahey(const Field& f) {
+  // if the current position is within the field, no wrapping is necessary
+  if (this->is_within_field(f)) {
+    return *this;
+  }
+
+  // move back into the field, and keep moving until we reach the other end of
+  // the field
+  while (!this->is_within_field(f)) {
+    this->move_backward();
+  }
+  while (this->is_within_field(f)) {
+    this->move_backward();
+  }
+
+  // move forward so we're back in the field
+  this->move_forward();
   return *this;
 }
 
