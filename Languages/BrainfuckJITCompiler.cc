@@ -26,7 +26,14 @@ static inline bool is_bf_command(char cmd) {
 
 
 static pair<map<ssize_t, ssize_t>, size_t> get_mover_loop_info(const string& code, size_t offset) {
-  // a mover loop has any combination of <>-+ within it, but nothing else
+  // a loop is a mover loop if all of the following are true:
+  // 1. the loop only contains <>-+
+  // 2. the loop contains the same number of < and >
+  // 3. the loop decrements the starting cell by 1 every time
+  // these loops can be optimized into various add/sub opcodes without actually
+  // moving rbx, which saves quite a bit of time since these loops are pretty
+  // common in brainfuck programs
+
   if (code[offset] != '[') {
     throw logic_error("get_mover_loop_info called on non-loop");
   }
@@ -146,15 +153,17 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case '<':
-        // TODO: fix bug here! a collapsed MoveLeft opcode can move past the
-        // boundary because we compare as if we're only moving by 1 byte
-        as.write_cmp(rbx, r12);
-        as.write_jle(string_printf("%zu_MoveLeft_skip", offset));
         if (count == 1) {
           as.write_dec(rbx);
         } else {
           as.write_sub(rbx, count);
         }
+
+        // note: using a conditional move is slower here, probably because the
+        // case where the move actually occurs is rare
+        as.write_cmp(rbx, r12);
+        as.write_jge(string_printf("%zu_MoveLeft_skip", offset));
+        as.write_mov(rbx, r12);
         as.write_label(string_printf("%zu_MoveLeft_skip", offset));
         break;
 
@@ -184,21 +193,23 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
             // TODO: we should do left-bound checking here
 
             // expand the memory space if the loop will hit the right bound
+            // TODO: for ridiculous loops, we might need to expand multiple
+            // times; implement this case
             if (max_offset > 0) {
               // most of the time, we won't need to expand, so use a scratch
               // register to avoid having to fix rbx when we don't expand
               as.write_lea(rax, MemoryReference(rbx, max_offset));
               as.write_cmp(rax, r13);
-              as.write_jle(string_printf("%zu_MoveRight_skip_expand", offset));
+              as.write_jle(string_printf("%zu_OptimizedMoverLoop_skip_expand", offset));
               as.write_mov(rbx, rax);
               as.write_call("expand");
               as.write_sub(rbx, max_offset);
-              as.write_label(string_printf("%zu_MoveRight_skip_expand", offset));
+              as.write_label(string_printf("%zu_OptimizedMoverLoop_skip_expand", offset));
             }
 
             // read the value and write it to the appropriate cells
             // TODO: we can optimize this further by grouping cells with the
-            // same multiplier together
+            // same multiplier together, so we don't have to recompute rcx
             as.write_movzx8(rax, MemoryReference(Register::RBX, 0));
             for (const auto& it : mi.first) {
               ssize_t offset = it.first;
