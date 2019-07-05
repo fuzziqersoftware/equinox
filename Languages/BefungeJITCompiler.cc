@@ -59,7 +59,7 @@ BefungeJITCompiler::BefungeJITCompiler(const string& filename,
       }
     }
 
-    if (this->debug_flags & DebugFlag::ShowAssembledCells) {
+    if (this->debug_flags & DebugFlag::ShowAssembly) {
       string dasm = AMD64Assembler::disassemble(data.data(), data.size(),
           reinterpret_cast<uint64_t>(executable), &label_offsets);
       fprintf(stderr, "compiled special functions:\n%s\n\n", dasm.c_str());
@@ -1878,7 +1878,7 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
         fprintf(stderr, "reset cell %s (opcode = %02hX \'%c\')\n",
             pos_str.c_str(), opcode, opcode);
       } else {
-        if (this->debug_flags & DebugFlag::ShowAssembledCells) {
+        if (this->debug_flags & DebugFlag::ShowAssembly) {
           string dasm = AMD64Assembler::disassemble(cell.code, cell.code_size,
               reinterpret_cast<uint64_t>(cell.code), &label_offsets);
           fprintf(stderr, "compiled cell %s (opcode = %02hX \'%c\'):\n%s\n\n",

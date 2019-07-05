@@ -16,19 +16,12 @@
 #include <libamd64/CodeBuffer.hh>
 
 #include "Befunge.hh"
+#include "Common.hh"
 
 
 
 class BefungeJITCompiler {
 public:
-  enum DebugFlag {
-    EnableStackPrintOpcode = 0x01,
-    ShowCompilationEvents  = 0x02,
-    ShowAssembledCells     = 0x04,
-    InteractiveDebug       = 0x08,
-    SingleStep             = 0x10,
-  };
-
   explicit BefungeJITCompiler(const std::string& filename,
       uint8_t dimensions = 2, uint64_t debug_flags = 0);
   ~BefungeJITCompiler() = default;

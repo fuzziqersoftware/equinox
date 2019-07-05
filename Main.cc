@@ -13,6 +13,7 @@
 #include <phosg/Time.hh>
 #include <string>
 
+#include "Languages/Common.hh"
 #include "Languages/BefungeInterpreter.hh"
 #include "Languages/BefungeJITCompiler.hh"
 #include "Languages/BrainfuckInterpreter.hh"
@@ -42,7 +43,8 @@ int main(int argc, char* argv[]) {
   Language language = Language::Automatic;
   int optimize_level = 2;
   uint8_t dimensions = 2;
-  size_t expansion_size = 0x10000; // 64KB
+  size_t cell_size = 8;
+  size_t expansion_size = 0x2000; // 64KB (8192 cells)
   size_t num_bad_options = 0;
   bool verbose = false;
   bool assembly = false;
@@ -78,8 +80,10 @@ int main(int argc, char* argv[]) {
       language = Language::Malbolge;
 
     // brainfuck options
+    } else if (!strncmp(argv[x], "--cell-size=", 12)) {
+      cell_size = atoi(&argv[x][12]);
     } else if (!strncmp(argv[x], "--memory-expansion-size=", 24)) {
-      expansion_size = atoi(&argv[x][14]);
+      expansion_size = atoi(&argv[x][24]);
     } else if (!strncmp(argv[x], "--optimize-level=", 17)) {
       optimize_level = atoi(&argv[x][17]);
 
@@ -142,9 +146,13 @@ Options for all languages:\n\
       No effect in interpret mode.\n\
 \n\
 Brainfuck-specific options:\n\
-  --memory-expansion-size=num_bytes\n\
-      Sets the size by which the memory space is expanded when the program\n\
-      accesses beyond the end (default 64KB).\n\
+  --cell-size=size\n\
+      Set the number of bytes per cell. May be 1, 2, 4, or 8 (default).\n\
+      If a program hangs during execution, it may rely on integer overflow\n\
+      semantics which depend on the cell size - try a smaller size.\n\
+  --memory-expansion-size=num_cells\n\
+      Sets the number of cells by which the memory space is expanded when the\n\
+      program accesses beyond the end (default 8192). Each cell is 8 bytes.\n\
   --optimize-level=level\n\
       Sets the optimization level. Probably you want 2 (default).\n\
       Level 0: Translate every opcode directly into a sequence of instructions.\n\
@@ -186,10 +194,13 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
   try {
     if (language == Language::Brainfuck) {
       if (behavior == Behavior::Interpret) {
-        bf_interpret(input_filename, expansion_size);
+        bf_interpret(input_filename, expansion_size, cell_size);
       } else if (behavior == Behavior::Execute) {
-        bf_execute(input_filename, expansion_size, optimize_level,
-            expansion_size, assembly);
+        uint64_t debug_flags =
+            (assembly ? (DebugFlag::ShowCompilationEvents | DebugFlag::ShowAssembly) : 0);
+        BrainfuckJITCompiler c(input_filename, expansion_size, cell_size,
+            optimize_level, expansion_size, debug_flags);
+        c.execute();
       }
     } else if (language == Language::Befunge) {
       if (behavior == Behavior::Interpret) {

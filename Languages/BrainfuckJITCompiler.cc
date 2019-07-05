@@ -1,3 +1,5 @@
+#include "BrainfuckJITCompiler.hh"
+
 #include <inttypes.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -16,6 +18,8 @@
 #include <libamd64/AMD64Assembler.hh>
 #include <libamd64/CodeBuffer.hh>
 
+#include "Common.hh"
+
 using namespace std;
 
 
@@ -25,7 +29,32 @@ static inline bool is_bf_command(char cmd) {
 }
 
 
-static pair<map<ssize_t, ssize_t>, size_t> get_mover_loop_info(const string& code, size_t offset) {
+BrainfuckJITCompiler::BrainfuckJITCompiler(const string& filename,
+    size_t mem_size, size_t cell_size, int optimize_level,
+    size_t expansion_size, uint64_t debug_flags) :
+    expansion_size(expansion_size), cell_size(cell_size),
+    optimize_level(optimize_level), debug_flags(debug_flags) {
+  this->code = load_file(filename);
+
+  try {
+    this->operand_size = this->cell_size_to_operand_size.at(this->cell_size);
+  } catch (const out_of_range&) {
+    throw invalid_argument("cell size must be 1, 2, 4, or 8");
+  }
+
+  // strip all the non-opcode data out of the code
+  char* write_ptr = const_cast<char*>(this->code.data());
+  for (char ch : this->code) {
+    if (is_bf_command(ch)) {
+      *(write_ptr++) = ch;
+    }
+  }
+  this->code.resize(write_ptr - this->code.data());
+}
+
+
+pair<map<ssize_t, ssize_t>, size_t> BrainfuckJITCompiler::get_mover_loop_info(
+    size_t offset) {
   // a loop is a mover loop if all of the following are true:
   // 1. the loop only contains <>-+
   // 2. the loop contains the same number of < and >
@@ -34,23 +63,23 @@ static pair<map<ssize_t, ssize_t>, size_t> get_mover_loop_info(const string& cod
   // moving rbx, which saves quite a bit of time since these loops are pretty
   // common in brainfuck programs
 
-  if (code[offset] != '[') {
+  if (this->code[offset] != '[') {
     throw logic_error("get_mover_loop_info called on non-loop");
   }
 
   map<ssize_t, ssize_t> ret;
   size_t start_offset = offset;
   ssize_t offset_delta = 0;
-  for (offset++; offset < code.size(); offset++) {
-    if (code[offset] == '<') {
+  for (offset++; offset < this->code.size(); offset++) {
+    if (this->code[offset] == '<') {
       offset_delta--;
-    } else if (code[offset] == '>') {
+    } else if (this->code[offset] == '>') {
       offset_delta++;
-    } else if (code[offset] == '+') {
+    } else if (this->code[offset] == '+') {
       ret[offset_delta]++;
-    } else if (code[offset] == '-') {
+    } else if (this->code[offset] == '-') {
       ret[offset_delta]--;
-    } else if (code[offset] == ']') {
+    } else if (this->code[offset] == ']') {
       break;
     } else {
       return make_pair(map<ssize_t, ssize_t>(), 0); // not a mover loop
@@ -58,7 +87,7 @@ static pair<map<ssize_t, ssize_t>, size_t> get_mover_loop_info(const string& cod
   }
   // if the loop didn't end or didn't leave the pointer in the same place as
   // when it started, it's not a mover loop
-  if ((offset >= code.size()) || (offset_delta != 0)) {
+  if ((offset >= this->code.size()) || (offset_delta != 0)) {
     return make_pair(map<ssize_t, ssize_t>(), 0);
   }
 
@@ -66,21 +95,22 @@ static pair<map<ssize_t, ssize_t>, size_t> get_mover_loop_info(const string& cod
 }
 
 
-void bf_execute(const char* filename, size_t mem_size, int optimize_level,
-    size_t expansion_size, bool disassemble) {
-  string code = load_file(filename);
-
-  // strip all the non-opcode data out of it
-  {
-    char* write_ptr = const_cast<char*>(code.data());
-    for (char ch : code) {
-      if (is_bf_command(ch)) {
-        *(write_ptr++) = ch;
-      }
-    }
-    code.resize(write_ptr - code.data());
+void BrainfuckJITCompiler::write_load_cell_value(AMD64Assembler& as,
+    const MemoryReference& dest, const MemoryReference& src) {
+  if (this->cell_size == 1) {
+    as.write_movzx8(dest, src);
+  } else if (this->cell_size == 2) {
+    as.write_movzx16(dest, src);
+  } else if (this->cell_size == 4) {
+    as.write_xor(dest, dest);
+    as.write_mov(dest, src, OperandSize::DoubleWord);
+  } else {
+    as.write_mov(dest, src);
   }
+}
 
+
+void BrainfuckJITCompiler::execute() {
   AMD64Assembler as;
 
   // r12 = memory ptr
@@ -90,23 +120,23 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
   // r15 = getchar
 
   // generate lead-in code
-  as.write_push(Register::RBP);
+  as.write_push(rbp);
   as.write_mov(rbp, rsp);
-  as.write_push(Register::RBX);
-  as.write_push(Register::R12);
-  as.write_push(Register::R13);
-  as.write_push(Register::R14);
-  as.write_push(Register::R15);
+  as.write_push(rbx);
+  as.write_push(r12);
+  as.write_push(r13);
+  as.write_push(r14);
+  as.write_push(r15);
 
   // allocate memory block
   as.write_mov(rdi, expansion_size);
-  as.write_mov(rsi, 1);
+  as.write_mov(rsi, cell_size);
   as.write_mov(rax, reinterpret_cast<int64_t>(&calloc));
   as.write_sub(rsp, 8);
   as.write_call(rax);
   as.write_add(rsp, 8);
   as.write_mov(r12, rax);
-  as.write_lea(r13, MemoryReference(rax, expansion_size - 1));
+  as.write_lea(r13, MemoryReference(rax, expansion_size - cell_size));
   as.write_mov(rbx, rax);
   as.write_mov(r14, reinterpret_cast<int64_t>(&putchar));
   as.write_mov(r15, reinterpret_cast<int64_t>(&getchar));
@@ -114,35 +144,35 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
   // generate assembly
   vector<size_t> jump_offsets;
   size_t count = 0;
-  for (size_t offset = 0; offset < code.size(); offset += count) {
-    int opcode = (offset == code.size()) ? EOF : code[offset];
+  for (size_t offset = 0; offset < this->code.size(); offset += count) {
+    char opcode = this->code[offset];
     count = 1;
     if (optimize_level) {
-      for (; (offset + count < code.size()) && (code[offset + count] == opcode); count++);
+      for (; (offset + count < this->code.size()) && (this->code[offset + count] == opcode); count++);
     }
 
     switch (opcode) {
       case '+':
         if (count == 1) {
-          as.write_inc(MemoryReference(Register::RBX, 0), OperandSize::Byte);
+          as.write_inc(MemoryReference(rbx, 0), this->operand_size);
         } else {
-          as.write_add(MemoryReference(Register::RBX, 0), count, OperandSize::Byte);
+          as.write_add(MemoryReference(rbx, 0), count, this->operand_size);
         }
         break;
 
       case '-':
         if (count == 1) {
-          as.write_dec(MemoryReference(Register::RBX, 0), OperandSize::Byte);
+          as.write_dec(MemoryReference(rbx, 0), this->operand_size);
         } else {
-          as.write_sub(MemoryReference(Register::RBX, 0), count, OperandSize::Byte);
+          as.write_sub(MemoryReference(rbx, 0), count, this->operand_size);
         }
         break;
 
       case '>':
-        if (count == 1) {
+        if (count == 1 && this->cell_size == 1) {
           as.write_inc(rbx);
         } else {
-          as.write_add(rbx, count);
+          as.write_add(rbx, count * this->cell_size);
         }
 
         // expand the memory space if needed
@@ -153,10 +183,10 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case '<':
-        if (count == 1) {
+        if (count == 1 && this->cell_size == 1) {
           as.write_dec(rbx);
         } else {
-          as.write_sub(rbx, count);
+          as.write_sub(rbx, count * this->cell_size);
         }
 
         // note: using a conditional move is slower here, probably because the
@@ -168,9 +198,9 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         break;
 
       case '[':
-        if (optimize_level > 1) {
+        if (this->optimize_level > 1) {
           // optimization: turn mover loops into better opcodes
-          auto mi = get_mover_loop_info(code, offset);
+          auto mi = this->get_mover_loop_info(offset);
           // if (0, -1) exists, then this is a mover loop. mi.first[0] may
           // create mi.first[0], but then it will have the value 0, so we won't
           // incorrectly think it's a mover loop when it isn't
@@ -181,7 +211,7 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
             // clear the current cell
             if (mi.first.size() == 1) {
               as.write_label(string_printf("%zu_OptimizedZeroCell", offset));
-              as.write_mov(MemoryReference(Register::RBX, 0), 0, OperandSize::Byte);
+              as.write_mov(MemoryReference(rbx, 0), 0, this->operand_size);
               break;
             }
 
@@ -193,24 +223,24 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
             // TODO: we should do left-bound checking here
 
             // expand the memory space if the loop will hit the right bound
-            // TODO: for ridiculous loops, we might need to expand multiple
-            // times; implement this case
             if (max_offset > 0) {
               // most of the time, we won't need to expand, so use a scratch
               // register to avoid having to fix rbx when we don't expand
-              as.write_lea(rax, MemoryReference(rbx, max_offset));
+              as.write_lea(rax, MemoryReference(rbx, max_offset * this->cell_size));
               as.write_cmp(rax, r13);
               as.write_jle(string_printf("%zu_OptimizedMoverLoop_skip_expand", offset));
               as.write_mov(rbx, rax);
               as.write_call("expand");
-              as.write_sub(rbx, max_offset);
+              as.write_sub(rbx, max_offset * this->cell_size);
               as.write_label(string_printf("%zu_OptimizedMoverLoop_skip_expand", offset));
             }
 
-            // read the value and write it to the appropriate cells
+            // read the value
+            this->write_load_cell_value(as, rax, MemoryReference(rbx, 0));
+
+            // update the appropriate cells
             // TODO: we can optimize this further by grouping cells with the
             // same multiplier together, so we don't have to recompute rcx
-            as.write_movzx8(rax, MemoryReference(Register::RBX, 0));
             for (const auto& it : mi.first) {
               ssize_t offset = it.first;
               ssize_t mult = it.second;
@@ -218,16 +248,19 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
               if (mult == 0) {
                 continue;
               } else if (mult == 1) {
-                as.write_add(MemoryReference(Register::RBX, offset), al, OperandSize::Byte);
+                as.write_add(MemoryReference(rbx, offset * this->cell_size),
+                    rax, this->operand_size);
               } else if (mult == -1) {
                 if (offset == 0) {
-                  as.write_mov(MemoryReference(Register::RBX, 0), 0, OperandSize::Byte);
+                  as.write_mov(MemoryReference(rbx, 0), 0, this->operand_size);
                 } else {
-                  as.write_sub(MemoryReference(Register::RBX, offset), al, OperandSize::Byte);
+                  as.write_sub(MemoryReference(rbx, offset * this->cell_size),
+                      rax, this->operand_size);
                 }
               } else {
                 as.write_imul_imm(rcx, rax, mult);
-                as.write_add(MemoryReference(rbx, offset), rcx, OperandSize::Byte);
+                as.write_add(MemoryReference(rbx, offset * this->cell_size),
+                    rcx, this->operand_size);
               }
             }
 
@@ -237,7 +270,7 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
 
         for (size_t x = 0; x < count; x++) {
           jump_offsets.emplace_back(offset + x);
-          as.write_cmp(MemoryReference(rbx, 0), 0, OperandSize::Byte);
+          as.write_cmp(MemoryReference(rbx, 0), 0, this->operand_size);
           as.write_je(string_printf("jump_%zu_end", jump_offsets.back()));
           as.write_label(string_printf("jump_%zu_begin", jump_offsets.back()));
         }
@@ -248,7 +281,7 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
           if (jump_offsets.empty()) {
             throw runtime_error("unbalanced braces");
           }
-          as.write_cmp(MemoryReference(Register::RBX, 0), 0, OperandSize::Byte);
+          as.write_cmp(MemoryReference(rbx, 0), 0, this->operand_size);
           as.write_jne(string_printf("jump_%zu_begin", jump_offsets.back()));
           as.write_label(string_printf("jump_%zu_end", jump_offsets.back()));
           jump_offsets.pop_back();
@@ -258,7 +291,7 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
       case '.':
         as.write_sub(rsp, 8);
         for (size_t x = 0; x < count; x++) {
-          as.write_movzx8(Register::RDI, MemoryReference(Register::RBX, 0));
+          this->write_load_cell_value(as, rdi, MemoryReference(rbx, 0));
           as.write_call(r14);
         }
         as.write_add(rsp, 8);
@@ -268,7 +301,7 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
         as.write_sub(rsp, 8);
         for (size_t x = 0; x < count; x++) {
           as.write_call(r15);
-          as.write_mov(MemoryReference(Register::RBX, 0), al, OperandSize::Byte);
+          as.write_mov(MemoryReference(rbx, 0), rax, this->operand_size);
         }
         as.write_add(rsp, 8);
         break;
@@ -276,12 +309,12 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
   }
 
   // generate lead-out code
-  as.write_pop(Register::R15);
-  as.write_pop(Register::R14);
-  as.write_pop(Register::R13);
-  as.write_pop(Register::R12);
-  as.write_pop(Register::RBX);
-  as.write_pop(Register::RBP);
+  as.write_pop(r15);
+  as.write_pop(r14);
+  as.write_pop(r13);
+  as.write_pop(r12);
+  as.write_pop(rbx);
+  as.write_pop(rbp);
   as.write_ret();
 
   {
@@ -291,7 +324,7 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
     // convert rbx and r13 from pointers to offset and size
     as.write_sub(rbx, r12);
     as.write_sub(r13, r12);
-    as.write_inc(r13);
+    as.write_add(r13, this->cell_size);
 
     // expand the data block so it ends at the next 64K boundary after the new
     // current offset
@@ -302,8 +335,8 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
     // pass the new size as the second argument - this is the current offset
     // rounded up to the next 64KB boundary.
     as.write_mov(rsi, rbx);
-    as.write_add(rsi, expansion_size);
-    as.write_and(rsi, ~(expansion_size - 1));
+    as.write_add(rsi, (this->expansion_size * this->cell_size));
+    as.write_and(rsi, ~((this->expansion_size * this->cell_size) - 1));
 
     // store the old size in r12, and the new size in r13
     as.write_mov(r12, r13);
@@ -323,20 +356,18 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
     as.write_call(rax);
 
     // convert r13 and rbx back to pointers, and we're done
-    as.write_lea(r13, MemoryReference(r12, -1, r13));
+    as.write_lea(r13, MemoryReference(r12, -this->cell_size, r13));
     as.write_add(rbx, r12);
     as.write_ret();
   }
 
-  CodeBuffer buf;
-
   multimap<size_t, string> compiled_labels;
   unordered_set<size_t> patch_offsets;
   string data = as.assemble(&patch_offsets, &compiled_labels);
-  void* executable_data = buf.append(data, &patch_offsets);
+  void* executable_data = this->buf.append(data, &patch_offsets);
   void (*function)() = reinterpret_cast<void(*)()>(executable_data);
 
-  if (disassemble) {
+  if (this->debug_flags & DebugFlag::ShowAssembly) {
     string disassembly = AMD64Assembler::disassemble(executable_data,
         data.size(), reinterpret_cast<int64_t>(executable_data),
         &compiled_labels);
@@ -345,3 +376,11 @@ void bf_execute(const char* filename, size_t mem_size, int optimize_level,
 
   function();
 }
+
+
+const unordered_map<size_t, OperandSize> BrainfuckJITCompiler::cell_size_to_operand_size({
+  {1, OperandSize::Byte},
+  {2, OperandSize::Word},
+  {4, OperandSize::DoubleWord},
+  {8, OperandSize::QuadWord},
+});
