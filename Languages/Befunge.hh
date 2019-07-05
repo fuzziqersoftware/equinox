@@ -26,6 +26,7 @@ struct Field {
   ssize_t wrap_z(ssize_t y) const;
 
   static Field load(const std::string& filename);
+  void save(const std::string& filename);
 };
 
 struct Position {

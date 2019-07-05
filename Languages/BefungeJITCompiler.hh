@@ -55,9 +55,12 @@ private:
   void compile_opcode_iterated(AMD64Assembler& as, const Position& iterator_pos,
       const Position& target_pos, int16_t opcode);
   const void* compile_cell(const Position& cell_pos, bool reset_cell = false);
+  void on_cell_contents_changed(int64_t x, int64_t y, int64_t z);
 
   static void write_function_call(AMD64Assembler& as,
       const MemoryReference& function_ref, bool stack_aligned);
+  static void write_function_call_unknown_alignment(AMD64Assembler& as,
+      const MemoryReference& function_ref);
   void write_jump_to_cell(AMD64Assembler& as, const Position& current_pos,
       const Position& next_pos);
   void write_jump_to_cell_unknown_alignment(AMD64Assembler& as,
@@ -85,17 +88,35 @@ private:
       int64_t return_position_token, int64_t x, int64_t y, int64_t z,
       int64_t value);
 
+  static int64_t dispatch_file_read(BefungeJITCompiler* c, const char* filename,
+      int64_t flags, Position* va, Position* vb);
+
   static void dispatch_print_state(const int64_t* stack_top, size_t count,
       const Position* pos, int64_t* storage_offset, int64_t dimensions);
 
-  void interactive_debug_hook(const Position& current_pos,
-      const Position& next_pos, int64_t stack_top, int64_t r13,
-      int64_t stack_end);
+  void interactive_debug_hook(const Position& current_pos, int64_t stack_top,
+      int64_t r13, int64_t stack_end, const int64_t* storage_offset);
   static void dispatch_interactive_debug_hook(BefungeJITCompiler* c,
-      const Position* current_pos, const Position* next_pos, int64_t stack_top,
-      int64_t r13, int64_t stack_end);
+      const Position* current_pos, int64_t stack_top, int64_t r13,
+      int64_t stack_end, const int64_t* storage_offset);
 
   static void dispatch_throw_error(const char* error_string);
+
+  struct SysinfoHL {
+    // this struct mirrors the actual layout on the stack of some of the fields
+    // returned by the 'y' opcode
+    int64_t least_point_z;
+    int64_t least_point_y;
+    int64_t least_point_x;
+    int64_t greatest_point_z;
+    int64_t greatest_point_y;
+    int64_t greatest_point_x;
+
+    int64_t day_info; // ((year - 1900) << 16) | (month << 8) | (day of month)
+    int64_t second_info; // (hour << 16) | (minute << 8) | (second)
+  } __attribute__((packed));
+
+  static void dispatch_get_sysinfo_hl(BefungeJITCompiler* c, SysinfoHL* si);
 
   uint8_t dimensions;
   uint64_t debug_flags;
@@ -115,4 +136,5 @@ private:
   const void* jump_return_38;
   const void* jump_return_8;
   const void* jump_return_0;
+  const void* compress_string_function;
 };

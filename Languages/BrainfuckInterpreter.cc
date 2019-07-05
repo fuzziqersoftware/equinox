@@ -19,59 +19,101 @@
 using namespace std;
 
 
-void bf_interpret(const char* filename, size_t expansion_size) {
+void bf_interpret(const char* filename, size_t expansion_size, size_t cell_size) {
+  if ((cell_size != 1) && (cell_size != 2) && (cell_size != 4) && (cell_size != 8)) {
+    throw invalid_argument("cell size must be 1, 2, 4, or 8");
+  }
+
   string code = load_file(filename);
 
-  deque<string> memory_blocks;
-  memory_blocks.emplace_back(expansion_size, 0);
-  deque<string>::iterator current_block = memory_blocks.begin();
-  size_t block_offset = 0;
-  size_t pc = 0;
+  void* memory = calloc(expansion_size, cell_size);
+  size_t memory_size = expansion_size;
 
+  size_t pc = 0;
+  size_t memory_offset = 0;
   while (pc < code.size()) {
     switch (code[pc]) {
       case '>':
-        if (block_offset < current_block->size() - 1) {
-          block_offset++;
-
-        } else {
-          if (current_block == memory_blocks.end() - 1) {
-            memory_blocks.emplace_back(expansion_size, 0);
-          }
-          current_block++;
-          block_offset = 0;
+        memory_offset++;
+        if (memory_offset >= memory_size) {
+          memory_size += expansion_size;
+          memory = realloc(memory, memory_size * cell_size);
+          memset(reinterpret_cast<uint8_t*>(memory) + ((memory_size - expansion_size) * cell_size),
+              0, expansion_size * cell_size);
         }
         break;
 
       case '<':
-        if (block_offset) {
-          block_offset--;
-        } else {
-          if (current_block != memory_blocks.begin()) {
-            current_block--;
-          }
-          block_offset = current_block->size() - 1;
+        if (memory_offset) {
+          memory_offset--;
         }
         break;
 
       case '+':
-        (*current_block)[block_offset]++;
+        if (cell_size == 1) {
+          (*(reinterpret_cast<uint8_t*>(memory) + memory_offset))++;
+        } else if (cell_size == 2) {
+          (*(reinterpret_cast<uint16_t*>(memory) + memory_offset))++;
+        } else if (cell_size == 4) {
+          (*(reinterpret_cast<uint32_t*>(memory) + memory_offset))++;
+        } else {
+          (*(reinterpret_cast<uint64_t*>(memory) + memory_offset))++;
+        }
         break;
 
       case '-':
-        (*current_block)[block_offset]--;
+        if (cell_size == 1) {
+          (*(reinterpret_cast<uint8_t*>(memory) + memory_offset))--;
+        } else if (cell_size == 2) {
+          (*(reinterpret_cast<uint16_t*>(memory) + memory_offset))--;
+        } else if (cell_size == 4) {
+          (*(reinterpret_cast<uint32_t*>(memory) + memory_offset))--;
+        } else {
+          (*(reinterpret_cast<uint64_t*>(memory) + memory_offset))--;
+        }
         break;
 
       case '.':
-        putchar((*current_block)[block_offset]);
+        char ch;
+        if (cell_size == 1) {
+          ch = *(reinterpret_cast<uint8_t*>(memory) + memory_offset);
+        } else if (cell_size == 2) {
+          ch = *(reinterpret_cast<uint16_t*>(memory) + memory_offset);
+        } else if (cell_size == 4) {
+          ch = *(reinterpret_cast<uint32_t*>(memory) + memory_offset);
+        } else {
+          ch = *(reinterpret_cast<uint64_t*>(memory) + memory_offset);
+        }
+        putchar(ch);
         break;
 
-      case ',':
-        (*current_block)[block_offset] = getchar();
+      case ',': {
+        char ch = getchar();
+        if (cell_size == 1) {
+          *(reinterpret_cast<uint8_t*>(memory) + memory_offset) = ch;
+        } else if (cell_size == 2) {
+          *(reinterpret_cast<uint16_t*>(memory) + memory_offset) = ch;
+        } else if (cell_size == 4) {
+          *(reinterpret_cast<uint32_t*>(memory) + memory_offset) = ch;
+        } else {
+          *(reinterpret_cast<uint64_t*>(memory) + memory_offset) = ch;
+        }
         break;
+      }
 
-      case '[':
-        if ((*current_block)[block_offset] == 0) {
+      case '[': {
+        uint64_t v;
+        if (cell_size == 1) {
+          v = *(reinterpret_cast<uint8_t*>(memory) + memory_offset);
+        } else if (cell_size == 2) {
+          v = *(reinterpret_cast<uint16_t*>(memory) + memory_offset);
+        } else if (cell_size == 4) {
+          v = *(reinterpret_cast<uint32_t*>(memory) + memory_offset);
+        } else {
+          v = *(reinterpret_cast<uint64_t*>(memory) + memory_offset);
+        }
+
+        if (v == 0) {
           size_t brace_level = 0;
           for (pc++; pc < code.size(); pc++) {
             if (code[pc] == '[') {
@@ -89,9 +131,21 @@ void bf_interpret(const char* filename, size_t expansion_size) {
           }
         }
         break;
+      }
 
-      case ']':
-        if ((*current_block)[block_offset] != 0) {
+      case ']': {
+        uint64_t v;
+        if (cell_size == 1) {
+          v = *(reinterpret_cast<uint8_t*>(memory) + memory_offset);
+        } else if (cell_size == 2) {
+          v = *(reinterpret_cast<uint16_t*>(memory) + memory_offset);
+        } else if (cell_size == 4) {
+          v = *(reinterpret_cast<uint32_t*>(memory) + memory_offset);
+        } else {
+          v = *(reinterpret_cast<uint64_t*>(memory) + memory_offset);
+        }
+
+        if (v != 0) {
           if (!pc) {
             throw runtime_error("close brace in first position");
           }
@@ -113,6 +167,7 @@ void bf_interpret(const char* filename, size_t expansion_size) {
           }
         }
         break;
+      }
     }
     pc++;
   }

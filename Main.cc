@@ -48,7 +48,6 @@ int main(int argc, char* argv[]) {
   size_t num_bad_options = 0;
   bool verbose = false;
   bool assembly = false;
-  bool enable_debug_opcode = false;
   bool single_step = false;
   set<Position> befunge_breakpoints;
   Behavior behavior = Behavior::Execute;
@@ -103,8 +102,6 @@ int main(int argc, char* argv[]) {
       befunge_breakpoints.emplace(x, y, z, 0, 0, 0);
     } else if (!strncmp(argv[x], "--dimensions=", 13)) {
       dimensions = atoi(&argv[x][13]);
-    } else if (!strcmp(argv[x], "--enable-debug-opcode")) {
-      enable_debug_opcode = true;
 
     // positional arguments
     } else if (!input_filename) {
@@ -163,8 +160,6 @@ Funge-98-specific options:\n\
   --dimensions=num\n\
       Chooses the sublanguage to use. 1 for Unefunge, 2 for Befunge (default),\n\
       3 for Trefunge.\n\
-  --enable-debug-opcode\n\
-      Allow the use of the Y opcode to print the execution state.\n\
   --single-step\n\
       Enable single-step debugging at program start time.\n\
   --breakpoint=x[,y[,z]]\n\
@@ -204,14 +199,13 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
       }
     } else if (language == Language::Befunge) {
       if (behavior == Behavior::Interpret) {
-        befunge_interpret(input_filename, dimensions, enable_debug_opcode);
+        BefungeInterpreter i(input_filename, dimensions);
+        i.execute();
       } else if (behavior == Behavior::Execute) {
-        using DF = BefungeJITCompiler::DebugFlag;
         uint64_t debug_flags =
-            (assembly ? (DF::ShowCompilationEvents | DF::ShowAssembledCells) : 0) |
-            (enable_debug_opcode ? DF::EnableStackPrintOpcode : 0) |
-            (single_step ? (DF::InteractiveDebug | DF::SingleStep) : 0) |
-            (befunge_breakpoints.empty() ? 0 : DF::InteractiveDebug);
+            (assembly ? (DebugFlag::ShowCompilationEvents | DebugFlag::ShowAssembly) : 0) |
+            (single_step ? (DebugFlag::InteractiveDebug | DebugFlag::SingleStep) : 0) |
+            (befunge_breakpoints.empty() ? 0 : DebugFlag::InteractiveDebug);
         BefungeJITCompiler c(input_filename, dimensions, debug_flags);
         for (const auto& pos : befunge_breakpoints) {
           c.set_breakpoint(pos);

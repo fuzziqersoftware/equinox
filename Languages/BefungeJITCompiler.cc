@@ -1,5 +1,7 @@
 #include "BefungeJITCompiler.hh"
 
+#include <phosg/Time.hh>
+
 using namespace std;
 
 
@@ -17,6 +19,10 @@ using namespace std;
 BefungeJITCompiler::BefungeJITCompiler(const string& filename,
     uint8_t dimensions, uint64_t debug_flags) : dimensions(dimensions),
     debug_flags(debug_flags), field(Field::load(filename)), next_token(1) {
+
+  if (dimensions < 1 || dimensions > 3) {
+    throw runtime_error("dimensions must be 1, 2, or 3");
+  }
 
   // initialiy, all cells are just calls to the compiler. but watch out: these
   // compiler calls might overwrite the cell that called them, so they can't
@@ -66,6 +72,31 @@ BefungeJITCompiler::BefungeJITCompiler(const string& filename,
     }
   }
 
+  // compile some useful functions that can't easily be written in C
+  {
+    AMD64Assembler as;
+    as.write_xor(rcx, rcx);
+    as.write_label("again");
+    as.write_inc(rcx);
+    as.write_lea(rax, MemoryReference(rdi, 0, rcx, 8));
+    as.write_cmp(rax, r13);
+    as.write_jg("too_long");
+    as.write_mov(rax, MemoryReference(rax, 0));
+    as.write_mov(MemoryReference(rdi, 0, rcx, 1), al, OperandSize::Byte);
+    as.write_cmp(al, 0);
+    as.write_jnz("again");
+    as.write_inc(rcx);
+    as.write_ret();
+    as.write_label("too_long");
+    as.write_mov(MemoryReference(rdi, 0, rcx, 1), 0, OperandSize::Byte);
+    as.write_ret();
+
+    unordered_set<size_t> patch_offsets;
+    multimap<size_t, string> label_offsets;
+    string data = as.assemble(&patch_offsets, &label_offsets);
+    this->compress_string_function = this->buf.append(data);
+  }
+
   // set up the common objects array
   this->add_common_object("%" PRId64, "%" PRId64);
   this->add_common_object("%" PRId64 " ", "%" PRId64 " ");
@@ -74,6 +105,7 @@ BefungeJITCompiler::BefungeJITCompiler(const string& filename,
   this->add_common_object("jump_return_38", this->jump_return_38);
   this->add_common_object("jump_return_8", this->jump_return_8);
   this->add_common_object("jump_return_0", this->jump_return_0);
+  this->add_common_object("compress_string", this->compress_string_function);
   this->add_common_object("dispatch_compile_cell",
       reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_compile_cell));
   this->add_common_object("dispatch_get_cell_code",
@@ -84,10 +116,12 @@ BefungeJITCompiler::BefungeJITCompiler(const string& filename,
       reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_field_read));
   this->add_common_object("dispatch_field_write",
       reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_field_write));
-  this->add_common_object("dispatch_print_state",
-      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_print_state));
+  this->add_common_object("dispatch_file_read",
+      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_file_read));
   this->add_common_object("dispatch_throw_error",
       reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_throw_error));
+  this->add_common_object("dispatch_get_sysinfo_hl",
+      reinterpret_cast<const void*>(&BefungeJITCompiler::dispatch_get_sysinfo_hl));
   this->add_common_object("fputs", reinterpret_cast<const void*>(&fputs));
   this->add_common_object("getchar", reinterpret_cast<const void*>(&getchar));
   this->add_common_object("printf", reinterpret_cast<const void*>(&printf));
@@ -193,10 +227,6 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_push(r13);
       as.write_lea(r13, MemoryReference(rsp, -8));
 
-      // TODO: figure out why r13 is set incorrectly when } is executed sometime
-      // after this
-      //as.write_int(3);
-
       // set the storage offset to the next cell position
       {
         Position next_pos = pos.copy().move_forward();
@@ -301,6 +331,17 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
         }
         as.write_push(r13);
         as.write_lea(r13, MemoryReference(rsp, -8));
+
+        // set the storage offset to the next cell position
+        // TODO: reduce code duplication with the above (non-empty stack) case
+        as.write_mov(this->storage_offset_reference(0), next_pos.x);
+        if (this->dimensions > 1) {
+          as.write_mov(this->storage_offset_reference(1), next_pos.y);
+          if (this->dimensions > 2) {
+            as.write_mov(this->storage_offset_reference(2), next_pos.z);
+          }
+        }
+
         this->write_jump_to_cell(as, pos, next_pos);
       }
       break;
@@ -326,44 +367,55 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_jmp("transfer_items");
       as.write_label("stack_one_item");
       as.write_pop(r11);
-
       as.write_label("transfer_items");
 
-      // restore the old storage offset
+      // restore the old storage offset. watch out: the second stack may be
+      // short or empty! we have to check for this before reading from it
+      as.write_lea(r8, MemoryReference(r13, 16)); // top of second stack
+      as.write_mov(r9, MemoryReference(r13, 8)); // end (last valid cell) of SS
+      as.write_xor(rax, rax);
+      as.write_xor(rcx, rcx);
       if (this->dimensions == 1) {
-        as.write_mov(rax, MemoryReference(r13, 16));
+        as.write_cmp(r8, r9);
+        as.write_cmovle(rax, MemoryReference(r8, 0));
         as.write_mov(this->storage_offset_reference(0), rax);
       } else if (this->dimensions == 2) {
-        as.write_mov(rax, MemoryReference(r13, 16));
+        as.write_cmp(r8, r9);
+        as.write_cmovle(rax, MemoryReference(r8, 0));
         as.write_mov(this->storage_offset_reference(1), rax);
-        as.write_mov(rax, MemoryReference(r13, 24));
-        as.write_mov(this->storage_offset_reference(0), rax);
+        as.write_cmovl(rcx, MemoryReference(r8, 8));
+        as.write_mov(this->storage_offset_reference(0), rcx);
       } else { // 3D
-        as.write_mov(rax, MemoryReference(r13, 16));
+        as.write_cmp(r8, r9);
+        as.write_cmovle(rax, MemoryReference(r8, 0));
         as.write_mov(this->storage_offset_reference(2), rax);
-        as.write_mov(rax, MemoryReference(r13, 24));
-        as.write_mov(this->storage_offset_reference(1), rax);
-        as.write_mov(rax, MemoryReference(r13, 32));
+        as.write_cmovl(rcx, MemoryReference(r8, 8));
+        as.write_mov(this->storage_offset_reference(1), rcx);
+
+        as.write_lea(rcx, MemoryReference(r8, 16));
+        as.write_cmp(rcx, r9);
+        as.write_xor(rax, rax);
+        as.write_cmovle(rax, MemoryReference(r8, 16));
         as.write_mov(this->storage_offset_reference(0), rax);
       }
 
+      // behavior is different if the count is negative vs. positive
       as.write_cmp(r11, 0);
       as.write_jge("count_nonnegative");
 
       as.write_label("count_negative");
-      //as.write_int(3);
-      as.write_lea(rsp, MemoryReference(r13, 8));
-      as.write_pop(r13);
-      for (int8_t dimension = this->dimensions - 1; dimension >= 0; dimension--) {
-        as.write_pop(this->storage_offset_reference(dimension));
-      }
 
-      // pop (-r11) items off the stack, but don't allow it to underflow
+      // remove the top stack
+      as.write_lea(rsp, MemoryReference(r13, 16));
+      as.write_mov(r13, MemoryReference(r13, 8));
+
+      // pop the storage offset and (-r11) more items off the stack, but don't
+      // allow it to underflow
       as.write_neg(r11);
-      as.write_lea(rsp, MemoryReference(rsp, 0, r11, 8));
-      as.write_cmp(rsp, r13);
-      as.write_jle("opcode_end");
-      as.write_lea(rsp, MemoryReference(r13, 8));
+      as.write_lea(rsp, MemoryReference(rsp, 8 * this->dimensions, r11, 8));
+      as.write_lea(rax, MemoryReference(r13, 8));
+      as.write_cmp(rsp, rax);
+      as.write_cmovg(rsp, rax);
       as.write_jmp("opcode_end");
 
       as.write_label("count_nonnegative");
@@ -387,6 +439,12 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
 
       // we're about to overwrite the old r13 value, so load it now
       as.write_mov(r13, MemoryReference(r13, 8));
+
+      // if the second stack is empty, rdx might point beyond the end, so check
+      // for underflow
+      as.write_lea(r9, MemoryReference(r13, 8));
+      as.write_cmp(rdx, r13);
+      as.write_cmovg(rdx, r9);
 
       as.write_label("copy_again");
       as.write_dec(r11);
@@ -496,6 +554,8 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       // r8 = past-tne-end pointer (to know when to terminate the loop)
       // we will always shift at least one item (since oldr13 must be present)
       // so we don't have to check before running the first loop iteration
+      // remember r11 is negative here, so these lea opcodes actually move
+      // rsp/r13 backward (which is what we want)
       as.write_lea(rdx, MemoryReference(rsp, 0, r11, 8));
       as.write_lea(rcx, MemoryReference(r13, 0, r11, 8));
       as.write_lea(r8, MemoryReference(r13, 0x10));
@@ -513,14 +573,14 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_label("pop_again");
       as.write_cmp(rsp, r13);
       as.write_jg("top_stack_empty");
-      as.write_mov(MemoryReference(rdx, 0), 0);
+      as.write_pop(MemoryReference(rdx, 0));
       as.write_jmp("pop_next_cell");
       as.write_label("top_stack_empty");
-      as.write_pop(MemoryReference(rdx, 0));
+      as.write_mov(MemoryReference(rdx, 0), 0);
       as.write_label("pop_next_cell");
       as.write_add(rdx, 8);
       as.write_inc(r11);
-      as.write_js("pop_again");
+      as.write_jnz("pop_again");
 
       as.write_label("opcode_end");
       this->write_jump_to_cell_unknown_alignment(as, pos, pos.copy().move_forward());
@@ -595,10 +655,7 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
     case '%':
       as.write_cmp(rsp, r13);
       as.write_jl("stack_sufficient");
-      as.write_je("stack_one_item");
-
-      // if the stack is empty, leave it alone (the result is 0)
-      this->write_jump_to_cell(as, pos, pos.copy().move_forward());
+      as.write_jg("stack_empty");
 
       // if there's one item on the stack:
       //   +: leave it there (0 + x)
@@ -618,6 +675,8 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       } else if (opcode != '+') {
         as.write_mov(MemoryReference(rsp, 0), 0);
       }
+
+      as.write_label("stack_empty");
       this->write_jump_to_cell(as, pos, pos.copy().move_forward());
 
       // if there are two or more items on the stack, operate on them
@@ -1190,6 +1249,8 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       // all cases end up calling a function with this first arg
       as.write_mov(rdi, this->common_object_reference("this"));
 
+      // stack (should) look like: rsp=[[z] y] x value
+
       // TODO: reduce ugly code duplication below
       // TODO: use storage offset in this command and in 'g'
 
@@ -1370,6 +1431,163 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       }
       break;
 
+    case 'i': // read file
+      // this is implemented by calling dispatch_file_read with args:
+      // rdi = this
+      // rsi = filename
+      // rdx = flags
+      // rcx = va ptr
+      // r8 = vb ptr
+
+      // dealing with strings is annoying! we'll read in all the arguments we
+      // need, then push them all back onto the stack for simplicity before
+      // actually calling the function
+
+      // compress the filename string to an actual c-string. this clobbers rax
+      // (which is fine) and returns the number of stack cells used in rcx,
+      // which may or may not include the null (it doesn't if the null came from
+      // the stack being empty)
+      as.write_mov(rdi, rsp);
+      as.write_call(this->common_object_reference("compress_string"));
+      as.write_lea(rax, MemoryReference(rdi, 0, rcx, 8));
+      as.write_mov(rsi, rdi);
+
+      // get the flags cell (if there is one on the stack)
+      as.write_xor(rdx, rdx);
+      as.write_cmp(rax, r13);
+      as.write_cmovle(rdx, MemoryReference(rax, 0));
+      as.write_add(rax, 8);
+
+      // get the position vector
+      as.write_xor(r9, r9);
+      as.write_xor(r10, r10);
+      as.write_xor(r11, r11);
+
+      if (this->dimensions > 2) {
+        as.write_cmp(rax, r13);
+        as.write_cmovle(r11, MemoryReference(rax, 0));
+        as.write_add(rax, 8);
+      }
+
+      if (this->dimensions > 1) {
+        as.write_cmp(rax, r13);
+        as.write_cmovle(r10, MemoryReference(rax, 0));
+        as.write_add(rax, 8);
+      }
+
+      as.write_cmp(rax, r13);
+      as.write_cmovle(r9, MemoryReference(rax, 0));
+      as.write_add(rax, 8);
+
+      // check if rax has passed the end of the stack
+      as.write_lea(r8, MemoryReference(r13, 8));
+      as.write_cmp(rax, r8);
+      as.write_cmovg(rax, r8);
+
+      // now the registers contain:
+      // rax = stack after everything gets popped
+      // rdi = filename ptr (will be overwritten by the this ptr later)
+      // rsi = filename ptr
+      // rdx = flags
+      // r9 = x
+      // r10 = y
+      // r11 = z
+
+      // we'll cheat a bit by pushing the following onto the stack, to make the
+      // function call easier to write:
+      // rsp (stack ptr after everything gets popped)
+      // va
+      // vb (uninitialized values since this is output-only)
+      // note: here, va and vb are always 3-dimensional because I'm lazy
+      as.write_push(rax);
+      if (this->dimensions > 2) {
+        as.write_push(r11);
+      } else {
+        as.write_push(0);
+      }
+      if (this->dimensions > 1) {
+        as.write_push(r10);
+      } else if (this->dimensions == 3) {
+        as.write_push(0);
+      }
+      as.write_push(r9);
+      as.write_mov(rcx, rsp);
+      as.write_sub(rsp, 24);
+      as.write_mov(r8, rsp);
+      as.write_mov(rdi, this->common_object_reference("this"));
+
+      // now the registers contain:
+      // rdi = this
+      // rsi = filename ptr
+      // rdx = flags
+      // rcx = va ptr
+      // r8 = vb ptr
+
+      // we're finally ready; read the file
+      this->write_function_call_unknown_alignment(as,
+          this->common_object_reference("dispatch_file_read"));
+
+      // figure out where the stack should end up after this call
+      as.write_mov(rdx, rsp);
+      as.write_mov(rsp, MemoryReference(rsp, 48));
+
+      // if the read failed, reflect
+      as.write_test(rax, rax);
+      as.write_jz("file_read_success");
+      this->write_jump_to_cell_unknown_alignment(as, pos, pos.copy().turn_around().move_forward());
+      as.write_label("file_read_success");
+
+      // now, copy va and vb into where they're supposed to go on the stack
+      if (this->dimensions == 3) {
+        as.write_push(MemoryReference(rdx, 40));
+        as.write_push(MemoryReference(rdx, 32));
+        as.write_push(MemoryReference(rdx, 24));
+      } else if (this->dimensions == 2) {
+        as.write_push(MemoryReference(rdx, 32));
+        as.write_push(MemoryReference(rdx, 24));
+      } else if (this->dimensions == 1) {
+        as.write_push(MemoryReference(rdx, 24));
+      }
+      if (this->dimensions == 3) {
+        as.write_push(MemoryReference(rdx, 16));
+        as.write_push(MemoryReference(rdx, 8));
+        as.write_push(MemoryReference(rdx, 0));
+      } else if (this->dimensions == 2) {
+        as.write_push(MemoryReference(rdx, 8));
+        as.write_push(MemoryReference(rdx, 0));
+      } else if (this->dimensions == 1) {
+        as.write_push(MemoryReference(rdx, 0));
+      }
+
+      // all done
+      this->write_jump_to_cell_unknown_alignment(as, pos, pos.copy().move_forward());
+      break;
+
+    // case 'o':
+      // break;
+      // o first pops a null-terminated 0"gnirts" string to use for a filename.
+      // Then it pops a flags cell. It then pops a vector Va indicating a least
+      // point (point with the smallest numerical coordinates of a region; also
+      // known as the upper-left corner, when used in the context of Befunge) in
+      // space, and another vector Vb describing the size of a rectangle (or a
+      // rectangular prism in Trefunge, etc). If the file named by the filename
+      // can be opened for writing, the contents of the rectangle of Funge-Space
+      // from Va to Va+Vb are written into it, and it is immediately closed. If
+      // not, the instruction acts like r.
+
+      // The first vectors popped by both of these instructions are considered
+      // relative to the storage offset. (The size vector Vb, of course, is
+      // relative to the least point Va.)
+
+      // Note that in a greater-than-two-dimensional environment, specifying a
+      // more-than-two-dimensional size such as (3,3,3) is not guaranteed to
+      // produce sensical results.
+
+      // Also, if the least significant bit of the flags cell is high, o treats
+      // the file as a linear text file; that is, any spaces before each EOL,
+      // and any EOLs before the EOF, are not written out. The resulting text
+      // file is identical in appearance and takes up less storage space.
+
     case '&': { // push user-supplied number
       as.write_xor(rax, rax); // number of float args (scanf is variadic)
       as.write_mov(rdi, this->common_object_reference("%" PRId64));
@@ -1388,6 +1606,176 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       this->write_jump_to_cell(as, pos, pos.copy().move_forward().change_alignment());
       break;
 
+    case 'y': // get sysinfo
+      as.write_mov(r10, rsp); // we'll need this later
+
+      // get the index argument
+      as.write_cmp(rsp, r13);
+      as.write_jg("stack_empty");
+      as.write_pop(r11);
+      as.write_jmp("count_available");
+      as.write_label("stack_empty");
+      as.write_xor(r11, r11);
+      as.write_label("count_available");
+
+      // the following fields are pushed in this order:
+
+      // vector of strings: env (NAME=VALUE), terminated by double null
+      // TODO
+      as.write_push(0);
+      as.write_push(0);
+
+      // vector of strings: argv, terminated by triple null (so a single argument can be null); first is name of Funge source program
+      // TODO
+      as.write_push(0);
+      as.write_push(0);
+      as.write_push(0);
+
+      // vector: size of each stack, starting from bottom (sizes as if y was not executed yet)
+      // r10 is the initial stack pointer (from before y began); we can use it
+      // to compute the stack sizes
+      as.write_mov(rax, r10);
+      as.write_mov(rdx, r13);
+      as.write_lea(r8, this->end_of_last_stack_reference());
+      as.write_xor(rcx, rcx); // number of stacks
+
+      // count this stack. rdx points to the last valid stack entry, so add 8
+      as.write_label("count_next_stack");
+      as.write_lea(r9, MemoryReference(rdx, 8));
+      as.write_sub(r9, rax);
+      as.write_shr(r9, 3);
+      as.write_push(r9);
+      as.write_inc(rcx);
+
+      as.write_cmp(rdx, r8); // check if this is the last stack
+      as.write_je("all_stacks_counted");
+      as.write_lea(rax, MemoryReference(rdx, 16));
+      as.write_mov(rdx, MemoryReference(rdx, 8));
+      as.write_jmp("count_next_stack");
+
+      as.write_label("all_stacks_counted");
+
+      // cell: number of stacks currently open
+      as.write_push(rcx);
+
+      // we'll need some high-level info for the next few cells
+      as.write_sub(rsp, sizeof(SysinfoHL));
+      as.write_mov(rdi, this->common_object_reference("this"));
+      as.write_mov(rsi, rsp);
+      as.write_push(r10); // can be clobbered by the function call, so save it
+      as.write_push(r11); // can be clobbered by the function call, so save it
+      this->write_function_call(as,
+          this->common_object_reference("dispatch_get_sysinfo_hl"), !pos.stack_aligned);
+      as.write_pop(r11);
+      as.write_pop(r10);
+
+      // get_sysinfo_hl accounts for the following cells:
+
+      // cell: (hour << 16) | (minute << 8) | (second)
+      // cell: ((year - 1900) << 16) | (month << 8) | (day of month)
+      // vector: greatest point with non-space cell
+      // vector: least point with non-space cell
+
+      // however, if the dimension isn't 3, we need to remove a couple of fields
+      // from the above two vectors
+      if (this->dimensions == 2) {
+        // stack looks like [0 y x 0 y x]; remove the zeroes
+        as.write_mov(rax, MemoryReference(rsp, 16));
+        as.write_mov(MemoryReference(rsp, 24), rax);
+        as.write_mov(rax, MemoryReference(rsp, 8));
+        as.write_mov(MemoryReference(rsp, 16), rax);
+        as.write_add(rsp, 16);
+      } else if (this->dimensions == 1) {
+        // stack looks like [0 0 x 0 0 x]; remove the zeroes
+        as.write_mov(rax, MemoryReference(rsp, 16));
+        as.write_mov(MemoryReference(rsp, 32), rax);
+        as.write_add(rsp, 32);
+      }
+
+      // vector: current storage offset
+      if (this->dimensions > 1) {
+        if (this->dimensions > 2) {
+          as.write_push(this->storage_offset_reference(2));
+        }
+        as.write_push(this->storage_offset_reference(1));
+      }
+      as.write_push(this->storage_offset_reference(0));
+
+      // vector: current delta
+      as.write_push(pos.dx);
+      if (this->dimensions > 1) {
+        as.write_push(pos.dy);
+        if (this->dimensions > 2) {
+          as.write_push(pos.dz);
+        }
+      }
+
+      // vector: current ip position
+      as.write_push(pos.x);
+      if (this->dimensions > 1) {
+        as.write_push(pos.y);
+        if (this->dimensions > 2) {
+          as.write_push(pos.z);
+        }
+      }
+
+      // cell: unique team number for current thread
+      as.write_push(0);
+
+      // cell: unique id for current thread
+      as.write_push(0); // TODO
+
+      // cell: number of dimensions (1=unefunge, etc.)
+      as.write_push(this->dimensions);
+
+      // cell: path separator character (/)
+      as.write_push(static_cast<int64_t>('/'));
+
+      // cell: operating paradigm. 0=unavailable, 1=system(), 2=specific shell, 3=same shell that started this compiler
+      // TODO: implement = and set this to nonzero
+      as.write_push(1);
+
+      // cell: implementation version number
+      as.write_push(0);
+
+      // cell: implementation handprint
+      as.write_push(0x5555555555555555);
+
+      // cell: number of bytes per cell (8 in our case)
+      as.write_push(8);
+
+      // cell: 0bUEOIT
+      //   Bit 0 (0x01): high if t is implemented. (is this Concurrent Funge-98?)
+      //   Bit 1 (0x02): high if i is implemented.
+      //   Bit 2 (0x04): high if o is implemented.
+      //   Bit 3 (0x08): high if = is implemented.
+      //   Bit 4 (0x10): high if unbuffered standard I/O (like getch()) is in effect, low if the usual buffered variety (like scanf("%c")) is being used.
+      // TODO: finish implementing io= and enable them here
+      as.write_push(0x0E);
+
+      // if the stack argument (r11) is positive, select out that item from the
+      // stack and throw away the others. if it's zero or negative, do nothing
+      as.write_dec(r11);
+      as.write_js("skip_select_field");
+
+      // figure out which item to read and check if it's within range
+      as.write_lea(r8, MemoryReference(rsp, 0, r11, 8));
+      as.write_cmp(r8, r13);
+      as.write_jg("select_beyond_stack_end");
+      as.write_mov(rax, MemoryReference(r8, 0));
+      as.write_jmp("select_clear_stack");
+      as.write_label("select_beyond_stack_end");
+      as.write_xor(rax, rax);
+      as.write_label("select_clear_stack");
+      as.write_lea(rsp, MemoryReference(r10, 8)); // r10 includes count that was popped, so +8
+      as.write_push(rax);
+
+      as.write_label("skip_select_field");
+
+      // finally we're done
+      this->write_jump_to_cell_unknown_alignment(as, pos, pos.copy().move_forward());
+      break;
+
     case '@': // end program
       as.write_mov(r13, MemoryReference(rbp, -0x10));
       as.write_mov(r12, MemoryReference(rbp, -0x08));
@@ -1395,29 +1783,6 @@ void BefungeJITCompiler::compile_opcode(AMD64Assembler& as, const Position& pos,
       as.write_pop(rbp);
       as.write_ret();
       break;
-
-    case 'Y': // stack debug opcode
-      if (this->debug_flags & DebugFlag::EnableStackPrintOpcode) {
-        as.write_mov(rdi, rsp);
-        as.write_lea(rsi, MemoryReference(r13, 8));
-        as.write_sub(rsi, rdi);
-        as.write_shr(rsi, 3);
-        as.write_push(pos.stack_aligned);
-        as.write_push(pos.dz);
-        as.write_push(pos.dy);
-        as.write_push(pos.dx);
-        as.write_push(pos.z);
-        as.write_push(pos.y);
-        as.write_push(pos.x);
-        as.write_mov(rdx, rsp);
-        as.write_lea(rcx, this->storage_offset_reference(this->dimensions - 1));
-        as.write_mov(r8, this->dimensions);
-        this->write_function_call(as,
-            this->common_object_reference("dispatch_print_state"), !pos.stack_aligned);
-        as.write_add(rsp, 7 * 8);
-        this->write_jump_to_cell(as, pos, pos.copy().move_forward());
-        break;
-      }
 
     default:
       throw invalid_argument(string_printf(
@@ -1896,6 +2261,33 @@ const void* BefungeJITCompiler::compile_cell(const Position& cell_pos,
   return this->compiled_cells.at(cell_pos).code;
 }
 
+void BefungeJITCompiler::on_cell_contents_changed(int64_t x, int64_t y, int64_t z) {
+  if (this->debug_flags & DebugFlag::SingleStep) {
+    char ch = this->field.get(x, y, z);
+    fprintf(stderr, "cell contents changed at x=%" PRId64 " y=%" PRId64 " z=%" PRId64 " with value=%02hhX (\'%c\')\n",
+        x, y, z, ch, ch);
+  }
+
+  // reset all the cells that this could affect
+  // TODO: we should check for remote opcodes, like ", ;, or k here. one
+  // solution could just be to reset the entire row and column, but that seems
+  // too heavy. ideally we would have a notion of value dependencies as well as
+  // address dependencies, and would use that here
+  int64_t min_dx = -0x8000000000000000;
+  Position pos(x, y, z, min_dx, min_dx, min_dx, false);
+  for (auto it = this->compiled_cells.lower_bound(pos);
+       it != this->compiled_cells.end(); it++) {
+    if ((it->first.x != pos.x) || (it->first.y != pos.y) || (it->first.z != pos.z)) {
+      break;
+    }
+    if (this->debug_flags & DebugFlag::SingleStep) {
+      string s = it->first.str();
+      fprintf(stderr, "- deleting compiled code for cell at %s\n", s.c_str());
+    }
+    this->compile_cell(it->first, true);
+  }
+}
+
 void BefungeJITCompiler::write_function_call(AMD64Assembler& as,
     const MemoryReference& function_ref, bool stack_aligned) {
   if (!stack_aligned) {
@@ -1907,6 +2299,19 @@ void BefungeJITCompiler::write_function_call(AMD64Assembler& as,
   }
 }
 
+void BefungeJITCompiler::write_function_call_unknown_alignment(
+    AMD64Assembler& as, const MemoryReference& function_ref) {
+  as.write_xor(rax, rax); // rax = 0
+  as.write_test(rsp, 8);
+  as.write_setz(al); // rax = (rsp & 8) ? 1 : 0
+  as.write_neg(rax); // rax = -1 if aligned for call, 0 if misaligned for call
+  as.write_lea(rax, MemoryReference(rsp, -8, rax, 8)); // move rsp back by 16 if aligned, 8 if misaligned
+  as.write_mov(MemoryReference(rax, 0), rsp); // save what rsp should be on return
+  as.write_mov(rsp, rax); // set up rsp for call
+  as.write_call(function_ref);
+  as.write_pop(rsp); // restore rsp on return
+}
+
 void BefungeJITCompiler::write_jump_to_cell(AMD64Assembler& as,
     const Position& cell_pos, const Position& next_pos) {
   Position& next_pos_norm = next_pos.copy().wrap_lahey(this->field);
@@ -1914,7 +2319,7 @@ void BefungeJITCompiler::write_jump_to_cell(AMD64Assembler& as,
 
   if (this->debug_flags & DebugFlag::InteractiveDebug) {
     as.write_mov(rdi, this->common_object_reference("this"));
-    as.write_mov(rcx, rsp);
+    as.write_mov(rdx, rsp);
     as.write_push(cell_pos.stack_aligned);
     as.write_push(cell_pos.dz);
     as.write_push(cell_pos.dy);
@@ -1923,25 +2328,18 @@ void BefungeJITCompiler::write_jump_to_cell(AMD64Assembler& as,
     as.write_push(cell_pos.y);
     as.write_push(cell_pos.x);
     as.write_mov(rsi, rsp);
-    as.write_push(next_pos_norm.stack_aligned);
-    as.write_push(next_pos_norm.dz);
-    as.write_push(next_pos_norm.dy);
-    as.write_push(next_pos_norm.dx);
-    as.write_push(next_pos_norm.z);
-    as.write_push(next_pos_norm.y);
-    as.write_push(next_pos_norm.x);
-    as.write_mov(rdx, rsp);
-    as.write_mov(r8, r13);
-    as.write_lea(r9, this->end_of_last_stack_reference());
+    as.write_mov(rcx, r13);
+    as.write_lea(r8, this->end_of_last_stack_reference());
+    as.write_lea(r9, this->storage_offset_reference(this->dimensions - 1));
 
-    if (!next_pos.stack_aligned) {
+    if (next_pos.stack_aligned) {
       as.write_sub(rsp, 8);
     }
     as.write_call(this->common_object_reference("dispatch_interactive_debug_hook"));
-    if (!next_pos.stack_aligned) {
-      as.write_add(rsp, 15 * 8);
+    if (next_pos.stack_aligned) {
+      as.write_add(rsp, 8 * 8);
     } else {
-      as.write_add(rsp, 14 * 8);
+      as.write_add(rsp, 7 * 8);
     }
   }
 
@@ -1974,9 +2372,9 @@ void BefungeJITCompiler::write_jump_to_cell(AMD64Assembler& as,
 void BefungeJITCompiler::write_jump_to_cell_unknown_alignment(
     AMD64Assembler& as, const Position& cell_pos, const Position& next_pos) {
   as.write_test(rsp, 8);
-  as.write_jz("stack_aligned");
+  as.write_jz("stack_aligned_" + next_pos.str());
   this->write_jump_to_cell(as, cell_pos, next_pos.copy().set_aligned(false));
-  as.write_label("stack_aligned");
+  as.write_label("stack_aligned_" + next_pos.str());
   this->write_jump_to_cell(as, cell_pos, next_pos.copy().set_aligned(true));
 }
 
@@ -2091,21 +2489,7 @@ const void* BefungeJITCompiler::dispatch_field_write(BefungeJITCompiler* c,
     int64_t return_position_token, int64_t x, int64_t y, int64_t z,
     int64_t value) {
   c->field.set(x, y, z, value);
-
-  // reset all the cells that this could affect
-  // TODO: we should check for remote opcodes, like ", ;, or k here. one
-  // solution could just be to reset the entire row and column, but that seems
-  // too heavy. ideally we would have a notion of value dependencies as well as
-  // address dependencies, and would use that here
-  int64_t min_dx = -0x8000000000000000;
-  Position pos(x, y, z, min_dx, min_dx, min_dx, false);
-  for (auto it = c->compiled_cells.lower_bound(pos);
-       it != c->compiled_cells.end(); it++) {
-    if ((it->first.x != pos.x) || (it->first.y != pos.y) || (it->first.z != pos.z)) {
-      break;
-    }
-    c->compile_cell(it->first, true);
-  }
+  c->on_cell_contents_changed(x, y, z);
 
   const auto& return_position = c->token_to_position.at(return_position_token);
   auto& return_cell = c->compiled_cells[return_position];
@@ -2117,41 +2501,79 @@ const void* BefungeJITCompiler::dispatch_field_write(BefungeJITCompiler* c,
   return ret;
 }
 
-void BefungeJITCompiler::dispatch_print_state(const int64_t* stack_top,
-    size_t count, const Position* pos, int64_t* storage_offset, int64_t dimensions) {
-  string storage_offset_str;
-  if (dimensions == 1) {
-    storage_offset_str = string_printf("(%" PRId64 ",)", *storage_offset);
-  } else if (dimensions == 2) {
-    storage_offset_str = string_printf("(%" PRId64 ", %" PRId64 ")",
-        storage_offset[1], storage_offset[0]);
-  } else if (dimensions == 3) {
-    storage_offset_str = string_printf("(%" PRId64 ", %" PRId64 ", %" PRId64 ")",
-        storage_offset[2], storage_offset[1], storage_offset[0]);
-  } else {
-    storage_offset_str = "<<invalid-dimension>>";
-  }
+int64_t BefungeJITCompiler::dispatch_file_read(BefungeJITCompiler* c,
+    const char* filename, int64_t flags, Position* va, Position* vb) {
+  // note: va and vb overlap! only the x, y, and z members are valid
 
-  string pos_str = pos->str();
-  fprintf(stderr, "[stack debug] at position %s with storage offset %s; stack at %p has %zu items; item 0 at top\n",
-      pos_str.c_str(), storage_offset_str.c_str(), stack_top, count);
-  for (size_t x = 0; x < count; x++) {
-    int64_t item = stack_top[x];
-    if (item >= 0x20 && item <= 0x7F) {
-      fprintf(stderr, "item %zu: %" PRId64 " (0x%" PRIX64 ") (%c)\n", x, item,
-          item, static_cast<char>(item));
-    } else {
-      fprintf(stderr, "item %zu: %" PRId64 " (0x%" PRIX64 ")\n", x, item, item);
+  fprintf(stderr, "dispatch_file_read: filename=%s, flags=%016" PRIX64 ", xa=%" PRId64 ", ya=%" PRId64 ", za=%" PRId64 "\n",
+      filename, flags, va->x, va->y, va->z);
+
+  try {
+    string data = load_file(filename);
+
+    bool binary = flags & 1;
+    Position where = *va;
+    vb->x = va->x;
+    vb->y = va->y;
+    vb->z = va->z;
+    for (char ch : data) {
+      if ((ch == '\n') && !binary) {
+        where.x = va->x;
+        where.y++;
+      } else if ((ch == '\r') && !binary) {
+        // ignore \r chars in text mode
+      } else {
+        if (ch != ' ') {
+          c->field.set(where.x, where.y, where.z, ch);
+          // TODO: this call is logarithmic; probably can be optimized somehow
+          c->on_cell_contents_changed(where.x, where.y, where.z);
+        }
+        where.x++;
+        if (where.x > vb->x) {
+          vb->x = where.x;
+        }
+        if (where.y > vb->y) {
+          vb->y = where.y + 1;
+        }
+      }
     }
+
+    vb->x -= va->x;
+    vb->y -= va->y;
+    vb->z -= va->z;
+
+    c->field.save("equinox_debug.b98");
+    fprintf(stderr, "dispatch_file_read succeeded with va = %" PRId64 " %" PRId64 " %" PRId64 " vb = %" PRId64 " %" PRId64 " %" PRId64 "\n",
+        va->x, va->y, va->z, vb->x, vb->y, vb->z);
+
+    return 0;
+
+  } catch (const exception& e) {
+    fprintf(stderr, "dispatch_file_read failed: %s\n", e.what());
+    return 1;
   }
+  // i pops a null-terminated 0"gnirts" string for the filename, followed by a flags
+  // cell, then a vector Va telling it where to operate. If the file can be opened
+  // for reading, it is inserted into Funge-Space at Va, and immediately closed. Two
+  // vectors are then pushed onto the stack, Va and Vb, suitable arguments to a
+  // corresponding o instruction. If the file open failed, the instruction acts like
+  // r.
+
+  // i is in all respects similar to the procedure used to load the main Funge source
+  // code file, except it may specify any file, not necessarily Funge source code,
+  // and at any location, not necessarily the origin.
+
+  // Also, if the least significant bit of the flags cell is high, i treats the file
+  // as a binary file; that is, EOL and FF sequences are stored in Funge-space
+  // instead of causing the dimension counters to be reset and incremented.
 }
 
 void BefungeJITCompiler::interactive_debug_hook(const Position& current_pos,
-    const Position& next_pos, int64_t stack_top, int64_t r13,
-    int64_t stack_end) {
+    int64_t stack_top, int64_t r13, int64_t stack_end,
+    const int64_t* storage_offset) {
   if (!(this->debug_flags & DebugFlag::SingleStep)) {
     for (const auto& pos : this->breakpoint_positions) {
-      if (pos.x == next_pos.x && pos.y == next_pos.y && pos.z == next_pos.z) {
+      if (pos.x == current_pos.x && pos.y == current_pos.y && pos.z == current_pos.z) {
         this->debug_flags |= DebugFlag::SingleStep;
         break;
       }
@@ -2159,31 +2581,89 @@ void BefungeJITCompiler::interactive_debug_hook(const Position& current_pos,
   }
 
   if (this->debug_flags & DebugFlag::SingleStep) {
-    string next_pos_str = next_pos.str();
-    string current_pos_str = current_pos.str();
-    fprintf(stderr, "single step: at = \'%c\' %s, to = '%c' %s\n",
-        this->field.get(current_pos.x, current_pos.y, current_pos.z),
-        current_pos_str.c_str(),
-        this->field.get(next_pos.x, next_pos.y, next_pos.z),
-        next_pos_str.c_str());
+    string storage_offset_str;
+    if (dimensions == 1) {
+      storage_offset_str = string_printf("(%" PRId64 ",)", *storage_offset);
+    } else if (dimensions == 2) {
+      storage_offset_str = string_printf("(%" PRId64 ", %" PRId64 ")",
+          storage_offset[1], storage_offset[0]);
+    } else if (dimensions == 3) {
+      storage_offset_str = string_printf("(%" PRId64 ", %" PRId64 ", %" PRId64 ")",
+          storage_offset[2], storage_offset[1], storage_offset[0]);
+    } else {
+      storage_offset_str = "<<invalid-dimension>>";
+    }
 
-    for (size_t stack_index = 0; stack_top < stack_end; stack_index++, stack_top += 8) {
-      for (size_t item_index = 0; stack_top <= r13; item_index++, stack_top += 8) {
-        int64_t item = *reinterpret_cast<int64_t*>(stack_top);
-        fprintf(stderr, "[stack %zu : %zu] %" PRId64 " (0x%" PRIX64 ")\n",
-            stack_index, item_index, item, item);
+    string current_pos_str = current_pos.str();
+    fprintf(stderr, "single step: at = \'%c\' %s, storage offset = %s\n",
+        this->field.get(current_pos.x, current_pos.y, current_pos.z),
+        current_pos_str.c_str(), storage_offset_str.c_str());
+
+    static string red_esc = format_color_escape(TerminalFormat::FG_RED, TerminalFormat::END);
+    static string normal_esc = format_color_escape(TerminalFormat::NORMAL, TerminalFormat::END);
+    for (int64_t y = current_pos.y - 4; y < current_pos.y + 5; y++) {
+      for (int64_t x = current_pos.x - 4; x < current_pos.x + 5; x++) {
+        char ch = this->field.get(x, y, current_pos.z);
+        if (x == current_pos.x && y == current_pos.y) {
+          fprintf(stderr, "%s%c%s", red_esc.c_str(), ch, normal_esc.c_str());
+        } else {
+          fputc(ch, stderr);
+        }
       }
-      r13 = *reinterpret_cast<int64_t*>(stack_top);
+      fputc('\n', stderr);
+    }
+
+    size_t stack_index = 0;
+    size_t item_index = 0;
+    int64_t field = stack_top;
+    int64_t stack_end_field = r13 + 8;
+    int64_t overall_end_field = stack_end + 8;
+    for (; field <= overall_end_field; field += 8) {
+      if (field == stack_end_field) {
+        fprintf(stderr, "[end of stack %zu]\n", stack_index);
+        stack_end_field = *reinterpret_cast<const int64_t*>(stack_end_field) + 8;
+        stack_index++;
+        item_index = 0;
+      } else {
+        int64_t item = *reinterpret_cast<int64_t*>(field);
+        if (item >= 0x20 && item < 0x7F) {
+          fprintf(stderr, "[stack %zu : %zu] %" PRId64 " (0x%" PRIX64 ") (\'%c\')\n",
+              stack_index, item_index, item, item, static_cast<char>(item));
+        } else {
+          fprintf(stderr, "[stack %zu : %zu] %" PRId64 " (0x%" PRIX64 ")\n",
+              stack_index, item_index, item, item);
+        }
+        item_index++;
+      }
     }
   }
 }
 
 void BefungeJITCompiler::dispatch_interactive_debug_hook(BefungeJITCompiler* c,
-    const Position* current_pos, const Position* next_pos, int64_t stack_top,
-    int64_t r13, int64_t stack_end) {
-  c->interactive_debug_hook(*current_pos, *next_pos, stack_top, r13, stack_end);
+    const Position* current_pos, int64_t stack_top, int64_t r13,
+    int64_t stack_end, const int64_t* storage_offset) {
+  c->interactive_debug_hook(*current_pos, stack_top, r13, stack_end, storage_offset);
 }
 
 void BefungeJITCompiler::dispatch_throw_error(const char* message) {
   throw runtime_error(message);
+}
+
+void BefungeJITCompiler::dispatch_get_sysinfo_hl(BefungeJITCompiler* c,
+    SysinfoHL* si) {
+  // TODO
+  si->least_point_x = 0;
+  si->least_point_y = 0;
+  si->least_point_z = 0;
+
+  // TODO
+  si->greatest_point_x = c->field.width();
+  si->greatest_point_y = c->field.height();
+  si->greatest_point_z = c->field.depth();
+
+  time_t t_secs = now() / 1000000;
+  struct tm t_parsed;
+  gmtime_r(&t_secs, &t_parsed);
+  si->day_info = (t_parsed.tm_year << 16) | (t_parsed.tm_mon << 8) | t_parsed.tm_mday;
+  si->second_info = (t_parsed.tm_hour << 16) | (t_parsed.tm_min << 8) | t_parsed.tm_sec;
 }

@@ -119,6 +119,16 @@ Field Field::load(const string& filename) {
   return f;
 }
 
+void Field::save(const string& filename) {
+  auto f = fopen_unique(filename, "wb");
+  for (const auto& plane : this->planes) {
+    for (const auto& line : plane) {
+      fwrite(line.data(), 1, line.size(), f.get());
+      fputc('\n', f.get());
+    }
+  }
+}
+
 
 
 Position::Position(uint8_t special_cell_id, bool stack_aligned) :
