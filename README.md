@@ -14,7 +14,7 @@ If it doesn't work on your system, let me know. It should build and run on all r
 
 ## Modes and options
 
-Usually you can just run `./equinox <filename>` and it should be able to figure out which language you want to use based on the filename. If it infers incorrectly, you can give the appropriate language option (e.g. `--befunge`) to override its guess.
+Usually you can just run `./equinox <filename>` and it should be able to figure out which language you want to use based on the filename. If it infers incorrectly, you can give the appropriate language option (e.g. `--language=brainfuck`) to override its guess.
 
 equinox will use the JIT compiler for the appropriate language if it's available. If it's not available or if you specify `--interpret`, equinox will use the interpreter for that language.
 
@@ -22,11 +22,11 @@ When using the JIT compiler, the option `--show-assembly` will cause all the gen
 
 ## Languages
 
-Currently equinox supports three languages to varying degrees. Suggestions for other esoteric languages to support are welcome.
+Currently equinox supports four languages to varying degrees. Suggestions for other esoteric languages to support are welcome.
 
 ### Brainfuck
 
-equinox will run files ending with the ".b" extension as Brainfuck. To force interpreting/compiling the input program as Brainfuck, use the `--brainfuck` option.
+equinox will run files ending with the ".b" extension as Brainfuck. To force interpreting/compiling the input program as Brainfuck, use the `--language=brainfuck` option.
 
 The Brainfuck implementation is fully working and correct in both interpret and compile modes.
 
@@ -36,7 +36,7 @@ For memory-hungry programs, you might want to increase the `--memory-expansion-s
 
 ### Funge-98
 
-equinox will run files ending with the ".bf" or ".b98" extensions as Funge-98. To force interpreting/compiling the input program as Funge-98, use the `--befunge` option.
+equinox will run files ending with the ".bf" or ".b98" extensions as Funge-98. To force interpreting/compiling the input program as Funge-98, use the `--language=funge-98` option.
 
 The Funge-98 JIT implementation is mostly working, but the interpreter is incomplete. Mycology's tests fail pretty early in the interpreter because the 'k' opcode isn't implemented; they fail much later in the JIT due to bugs in the file I/O opcodes. There's also a known inefficiency in the JIT: each cell will be compiled multiple times depending on how many different directions it's entered from (among other factors), so the code buffer can get quite large.
 
@@ -46,6 +46,14 @@ To start a Funge-98 program in single-step debugging mode, use the `--single-ste
 
 ### Malbolge
 
-equinox will run files ending with the ".mal" extension as Malbolge. To force interpreting the input program as Malbolge, use the `--malbolge` option.
+equinox will run files ending with the ".mal" extension as Malbolge. To force interpreting the input program as Malbolge, use the `--language=malbolge` option.
 
 Malbolge runs only in interpret mode; equinox does not have a compiler implementation for this language. There are no language-specific options. There's definitely some kind of unfixed critical bug in the interpreter; Hello World works but 99 Bottles hangs forever. That's on my TODO list.
+
+### Deadfish
+
+equinox will run files ending with the ".df" extension as Deadfish. To force interpreting/compiling the input program as Deadfish, use the `--language=deadfish` option.
+
+The Deadfish implementation is fully working and correct in both interpret and compile modes. The author is aware that compiling this language is totally pointless, but he wrote a (non-optimizing) compiler anyway. Such is life.
+
+Use the `--ascii` option to output characters instead of decimal representations of numbers.

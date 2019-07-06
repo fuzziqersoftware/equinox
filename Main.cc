@@ -19,6 +19,8 @@
 #include "Languages/BrainfuckInterpreter.hh"
 #include "Languages/BrainfuckJITCompiler.hh"
 #include "Languages/MalbolgeInterpreter.hh"
+#include "Languages/DeadfishInterpreter.hh"
+#include "Languages/DeadfishJITCompiler.hh"
 
 using namespace std;
 
@@ -34,6 +36,7 @@ enum class Language {
   Brainfuck,
   Befunge,
   Malbolge,
+  Deadfish,
 };
 
 
@@ -50,6 +53,7 @@ int main(int argc, char* argv[]) {
   bool assembly = false;
   bool single_step = false;
   set<Position> befunge_breakpoints;
+  bool deadfish_ascii = false;
   Behavior behavior = Behavior::Execute;
   const char* input_filename = NULL;
 
@@ -69,14 +73,18 @@ int main(int argc, char* argv[]) {
       behavior = Behavior::Execute;
 
     // language selection
-    } else if (!strcmp(argv[x], "--automatic")) {
+    } else if (!strcmp(argv[x], "--language=automatic")) {
       language = Language::Automatic;
-    } else if (!strcmp(argv[x], "--brainfuck")) {
+    } else if (!strcmp(argv[x], "--language=brainfuck")) {
       language = Language::Brainfuck;
-    } else if (!strcmp(argv[x], "--befunge")) {
+    } else if (!strcmp(argv[x], "--language=funge-98")) {
       language = Language::Befunge;
-    } else if (!strcmp(argv[x], "--malbolge")) {
+    } else if (!strcmp(argv[x], "--language=befunge")) {
+      language = Language::Befunge;
+    } else if (!strcmp(argv[x], "--language=malbolge")) {
       language = Language::Malbolge;
+    } else if (!strcmp(argv[x], "--language=deadfish")) {
+      language = Language::Deadfish;
 
     // brainfuck options
     } else if (!strncmp(argv[x], "--cell-size=", 12)) {
@@ -103,6 +111,10 @@ int main(int argc, char* argv[]) {
     } else if (!strncmp(argv[x], "--dimensions=", 13)) {
       dimensions = atoi(&argv[x][13]);
 
+    // deadfish options
+    } else if (!strcmp(argv[x], "--ascii")) {
+      deadfish_ascii = true;
+
     // positional arguments
     } else if (!input_filename) {
       input_filename = argv[x];
@@ -122,14 +134,16 @@ int main(int argc, char* argv[]) {
 Usage: %s [options] program_file\n\
 \n\
 Languages:\n\
-  --automatic\n\
+  --language=automatic\n\
       Automatically detect the language based on the filename (default).\n\
-  --befunge\n\
+  --language=funge=98 or --language=befunge\n\
       Run the file as Funge-98.\n\
-  --brainfuck\n\
+  --language=brainfuck\n\
       Run the file as Brainfuck.\n\
-  --malbolge\n\
+  --language=malbolge\n\
       Run the file as Malbolge.\n\
+  --language=deadfish\n\
+      Run the file as Deadfish.\n\
 \n\
 Modes:\n\
   --interpret\n\
@@ -167,6 +181,11 @@ Funge-98-specific options:\n\
       This option may be given multiple times.\n\
 \n\
 Malbolge runs only in interpret mode. There are no language-specific options.\n\
+\n\
+Deadfish-specific options:\n\
+  --ascii\n\
+      Output the ASCII character corresponding to each output number instead of\n\
+      the number\'s decimal representation.\n\
 ", argv[0]);
     return 1;
   }
@@ -180,30 +199,33 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
       language = Language::Befunge;
     } else if (ends_with(input_filename, ".mal")) {
       language = Language::Malbolge;
+    } else if (ends_with(input_filename, ".df")) {
+      language = Language::Deadfish;
     } else {
       fprintf(stderr, "equinox: cannot detect language\n");
       return 1;
     }
   }
 
+  uint64_t debug_flags =
+      (assembly ? (DebugFlag::ShowCompilationEvents | DebugFlag::ShowAssembly) : 0);
+
   try {
     if (language == Language::Brainfuck) {
       if (behavior == Behavior::Interpret) {
         bf_interpret(input_filename, expansion_size, cell_size);
       } else if (behavior == Behavior::Execute) {
-        uint64_t debug_flags =
-            (assembly ? (DebugFlag::ShowCompilationEvents | DebugFlag::ShowAssembly) : 0);
         BrainfuckJITCompiler c(input_filename, expansion_size, cell_size,
             optimize_level, expansion_size, debug_flags);
         c.execute();
       }
+
     } else if (language == Language::Befunge) {
       if (behavior == Behavior::Interpret) {
         BefungeInterpreter i(input_filename, dimensions);
         i.execute();
       } else if (behavior == Behavior::Execute) {
-        uint64_t debug_flags =
-            (assembly ? (DebugFlag::ShowCompilationEvents | DebugFlag::ShowAssembly) : 0) |
+        debug_flags |=
             (single_step ? (DebugFlag::InteractiveDebug | DebugFlag::SingleStep) : 0) |
             (befunge_breakpoints.empty() ? 0 : DebugFlag::InteractiveDebug);
         BefungeJITCompiler c(input_filename, dimensions, debug_flags);
@@ -212,12 +234,23 @@ Malbolge runs only in interpret mode. There are no language-specific options.\n\
         }
         c.execute();
       }
+
     } else if (language == Language::Malbolge) {
       if (behavior == Behavior::Execute) {
         fprintf(stderr, "warning: malbolge compiler not implemented; falling back to interpreter\n");
       }
       malbolge_interpret(input_filename);
+
+    } else if (language == Language::Deadfish) {
+      if (behavior == Behavior::Interpret) {
+        DeadfishInterpreter i(input_filename, deadfish_ascii);
+        i.execute();
+      } else if (behavior == Behavior::Execute) {
+        DeadfishJITCompiler c(input_filename, deadfish_ascii, debug_flags);
+        c.execute();
+      }
     }
+
   } catch (const exception& e) {
     fprintf(stderr, "failed: %s\n", e.what());
     return 1;

@@ -1,5 +1,9 @@
 CXX=g++
-OBJECTS=Main.o Languages/BrainfuckInterpreter.o Languages/BrainfuckJITCompiler.o Languages/Befunge.o Languages/BefungeInterpreter.o Languages/BefungeJITCompiler.o Languages/MalbolgeInterpreter.o
+OBJECTS=Main.o \
+	Languages/BrainfuckInterpreter.o Languages/BrainfuckJITCompiler.o \
+	Languages/Befunge.o Languages/BefungeInterpreter.o Languages/BefungeJITCompiler.o \
+	Languages/MalbolgeInterpreter.o \
+	Languages/DeadfishInterpreter.o Languages/DeadfishJITCompiler.o
 CXXFLAGS=-g -I/usr/local/include -I/opt/local/include -std=c++14 -Wall -Werror -Wno-deprecated-declarations
 LDFLAGS=-g -L/usr/local/lib -L/opt/local/lib -lphosg -lamd64
 
