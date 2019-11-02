@@ -372,6 +372,8 @@ void BrainfuckJITCompiler::execute() {
         data.size(), reinterpret_cast<int64_t>(executable_data),
         &compiled_labels);
     fprintf(stderr, "%s\n", disassembly.c_str());
+    string size_str = format_size(data.size());
+    fprintf(stderr, "code buffer size: %s\n", size_str.c_str());
   }
 
   function();
