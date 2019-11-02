@@ -42,7 +42,6 @@ enum class Language {
 
 
 int main(int argc, char* argv[]) {
-
   Language language = Language::Automatic;
   int optimize_level = 2;
   uint8_t dimensions = 2;
@@ -189,6 +188,8 @@ Deadfish-specific options:\n\
 ", argv[0]);
     return 1;
   }
+
+  srand(time(NULL));
 
   if (language == Language::Automatic) {
     if (ends_with(input_filename, ".b")) {
